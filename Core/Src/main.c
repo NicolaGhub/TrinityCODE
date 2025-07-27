@@ -211,7 +211,10 @@ int main(void)
 
   //float barvar = get_barometer_variance(&hspi3, 10000); //got ~0.02
 
-  sector_erase(&hspi1, 0);//blocking
+  sector_erase(&hspi1, 0);//blocking, erases 4kb of data starting from address 0x00. Consider bock erase for 64kb
+
+  //NOR FLASH TRY CODE
+  /*
   //uint8_t flash_status = is_flash_busy(&hspi1);
   //TxBufA[16] = 11;
   for (int i=0;i<100;i++) {
@@ -231,13 +234,16 @@ int main(void)
   //flash_status = is_flash_busy(&hspi1);
   if (!is_flash_busy(&hspi1)) {
 	  fast_read_flash(FastRxBufA_with_cmd ,20, &hspi1);
-  }
+  }*/
 
+
+
+  //SD INITIALIZATION
   //blog post made by the maker of the library: https://01001000.xyz/2020-08-09-Tutorial-STM32CubeIDE-SD-card/
   //library used for SD CARD: https://github.com/kiwih/cubeide-sd-card
   //Video used for SD CARD: https://youtu.be/spVIZO-jbxE?si=KLvULVrA2ofx23bV
 
-  /*
+
   FATFS fs;       // File system object
   FIL file;       // File object
   FRESULT res;    // FatFS result type
@@ -260,18 +266,23 @@ int main(void)
 
   // Write text to file
   char text[] = "Hello from STM32!\r\n";
-  res = f_write(&file, text, strlen(text), &bw);
+  uint8_t datatry[4] = {1,2,3,4};
+  //res = f_write(&file, text, strlen(text), &bw);
+  res = f_write(&file, datatry, sizeof(datatry), &bw);
   if (res != FR_OK || bw == 0) {
       // Handle write error
       Error_Handler();
   }
 
+  //equivalent of flushing. Secures the data written but keeps the file open
+  f_sync(&file);
+
   // Close the file
   f_close(&file);
 
   // Optional: unmount the filesystem
-  f_mount(NULL, "", 1);
-  */
+  //f_mount(NULL, "", 1);
+
 
   float press_bar = 0;
   int32_t press_raw = 0;
@@ -284,6 +295,7 @@ int main(void)
   uint32_t toc=0;
   uint32_t elaps = 0;
   uint32_t micro_elaps = 0;
+  uint32_t write_faults = 0;
 
 
 
@@ -314,8 +326,17 @@ int main(void)
 	    FILLING_BUF_B
 	} BufferState;
 	static BufferState bufferstate = FILLING_BUF_A;
+
 	static uint8_t loggingdata = 0;
 
+	typedef enum {
+	    IDLE,
+	    FILLING_BUF_B
+	} BufferState;
+	static RocketState rocketstate = FILLING_BUF_A;
+
+
+	//READINGS
 	if (is_ADC_done()) {
 		ADC_to_voltages(adc_dma_buf,voltages);
 	}
@@ -447,13 +468,24 @@ int main(void)
 	alt = -T0*RR / (g0 * p0) * (press_bar - p0); //press to altitude formula. approximated even more through Taylor expansion, but it's fine for my altitude range
 
 	if (loggingdata == 1) {
-		static uint fill_idx = 0; //to know at what index of the buffer we are at
-		static const uint buffer_size = sizeof(TxBufA) / sizeof(TxBufA[0]);//assume BufA and BufB are of the same size. the division is added for "the concept", but the denominator has value 1
-		static const uint packet_size = 16;//placeholder for now
-		static const uint max_start_idx = buffer_size - packet_size; //max_idx at which we can start writing
+		static unsigned int fill_idx = 0; //to know at what index of the buffer we are at
+		static const unsigned int buffer_size = 256; //sizeof(TxBufA) / sizeof(TxBufA[0]);//assume BufA and BufB are of the same size. the division is added for "the concept", but the denominator has value 1
+		static const unsigned int packet_size = 12;//placeholder for now. consider calculating once, after the first data packet is created
+		static const unsigned int max_start_idx = buffer_size - packet_size; //max_idx at which we can start writing
 
-		if (fill_idx > max_start_idx) {
-			bufferstate ^= 1; //flips buffer state with XOR gate
+		if (fill_idx > max_start_idx) {//if the buffer is full or if it would overflow
+
+			//if the execution enters here, then the last used buffer is good to go to be written.
+			//Selects the last used buffer, before we change the buffer state
+			uint8_t *WriteBuf = (bufferstate == FILLING_BUF_A) ? TxBufA_with_cmd : TxBufB_with_cmd;
+			if(is_SPI1_done()) {
+				flash_program(WriteBuf, &hspi1);
+			}
+			else {
+				write_faults += 1; //signals that one buffer was skipped
+			}
+
+			bufferstate ^= 1; //flips buffer state with XOR gate (FILLING_BUF_A <----> FILLING_BUF_B)
 			fill_idx = 0;
 		}
 
@@ -462,13 +494,13 @@ int main(void)
 		//ALL THE SIZES COMBINED NEED TO ADD UP TO packet_size
 
 		//time and pacing data
-		memcpy(Buffer + fill_idx, counter, sizeof(counter));
+		memcpy(Buffer + fill_idx, &counter, sizeof(counter));
 		fill_idx += sizeof(counter);
 
-		memcpy(Buffer + fill_idx, tic, sizeof(tic));
+		memcpy(Buffer + fill_idx, &tic, sizeof(tic));
 		fill_idx += sizeof(tic);
 
-		memcpy(Buffer + fill_idx, micro_elaps, sizeof(micro_elaps));
+		memcpy(Buffer + fill_idx, &micro_elaps, sizeof(micro_elaps));
 		fill_idx += sizeof(micro_elaps);
 
 	}

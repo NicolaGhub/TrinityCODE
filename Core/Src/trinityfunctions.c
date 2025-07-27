@@ -236,6 +236,12 @@ void flash_WriteEnable(SPI_HandleTypeDef *hspi) {
 }
 
 void flash_program(uint8_t* Buf, SPI_HandleTypeDef *hspi) {
+	//this function automatically changes page every time it is called, no matter how many bytes are written (max 256)
+	//The buffer that needs to be passed needs to contain the page program command at its first byte
+	//the next threee bytes are reserved to the address at which we want to write.
+
+	//Note that the NOR flash can only program pages that have previously been erased, since it can only flip bits
+	//from 1 to 0 and not the other way. The block/sector erase function sets the selected memory bits to 1.
 	spi1_done = 0;
 
 	static uint32_t current_address = 0x000000; //available addresses are 000000h to FFFFFFh --> 2^24 bytes ~= 16Mbyte
