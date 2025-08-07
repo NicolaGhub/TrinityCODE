@@ -97,6 +97,18 @@ void initBar(SPI_HandleTypeDef *hspi, uint8_t *ptBuff) {
 	HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_RESET);
 	HAL_SPI_Transmit(hspi, cmd, 2, HAL_MAX_DELAY);
 	HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET);
+
+	/*//control register 2
+	uint8_t cmd2[2] = { //CTRL_REG1
+	    (0x21 & 0x7F),   // register 0x21h, write operation (MSB=0)
+	    0b00000000 //interrupt is generation set to off
+	};
+	HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_RESET);
+	HAL_SPI_Transmit(hspi, cmd2, 2, HAL_MAX_DELAY);
+	HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET);
+	HAL_Delay(5);*/
+
+
 /*
 	uint8_t cmd2[2] = { //interrupt set to data ready
 		(0x23 & 0x7F),   // register 0x23h, write operation (MSB=0)
@@ -235,6 +247,7 @@ void flash_WriteEnable(SPI_HandleTypeDef *hspi) {
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
 }
 
+uint32_t current_address = 0x000000; //available addresses are 000000h to FFFFFFh --> 2^24 bytes ~= 16Mbyte
 void flash_program(uint8_t* Buf, SPI_HandleTypeDef *hspi) {
 	//this function automatically changes page every time it is called, no matter how many bytes are written (max 256)
 	//The buffer that needs to be passed needs to contain the page program command at its first byte
@@ -244,7 +257,6 @@ void flash_program(uint8_t* Buf, SPI_HandleTypeDef *hspi) {
 	//from 1 to 0 and not the other way. The block/sector erase function sets the selected memory bits to 1.
 	spi1_done = 0;
 
-	static uint32_t current_address = 0x000000; //available addresses are 000000h to FFFFFFh --> 2^24 bytes ~= 16Mbyte
 	static uint32_t n_cycles = 0;
 
 	current_address = 0x00+ 256*n_cycles; //sets the address to be increased of 256 bytes after the last page program sequence
@@ -258,17 +270,28 @@ void flash_program(uint8_t* Buf, SPI_HandleTypeDef *hspi) {
 	n_cycles += 1;
 }
 
-void fast_read_flash(uint8_t *RxBuf ,int data_byte_quantity, SPI_HandleTypeDef *hspi) {
-	spi1_done = 0;
+uint32_t get_flash_add() {
+	return current_address; //returns the last flash address at which we wrote a page
+}
 
-	uint8_t cmd[256 + 5] = {0x0B,0x00,0x00,0x00}; // [0Bh] [A23 - A16] [A15 - A8] [A7 - A0] [dummy] [(D7 - D0)] [continuous...
+void fast_read_flash(uint8_t *RxBuf ,uint32_t data_byte_quantity, uint32_t address, SPI_HandleTypeDef *hspi) {
+	spi1_done = 0;
+	uint8_t addr_pieces[3] = {};
+	addr_pieces[0] = address >> 16;
+	addr_pieces[1] = address >>  8;
+	addr_pieces[2] = address      ;
+
+	uint8_t cmd[256 + 5] = {0x0B,addr_pieces[0],addr_pieces[1],addr_pieces[2]}; // [0Bh] [A23 - A16] [A15 - A8] [A7 - A0] [dummy] [(D7 - D0)] [continuous...
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
-	HAL_SPI_TransmitReceive_DMA(hspi, cmd, RxBuf, data_byte_quantity + 5);
+	//HAL_SPI_TransmitReceive_DMA(hspi, cmd, RxBuf, data_byte_quantity + 5);
+	HAL_SPI_TransmitReceive(hspi, cmd, RxBuf, data_byte_quantity + 5, HAL_MAX_DELAY);//blocking
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+	spi1_done = 1;
 }
 
 void read_flash(uint8_t *RxBuf ,int data_byte_quantity, SPI_HandleTypeDef *hspi) {
 	spi1_done = 0;
-
+//consider making this blocking (just like fast read), otherwise data might not have fiinished being read when writing to the SD right away
 	uint8_t cmd[256 + 4] = {0x03,0x00,0x00,0x00}; // [0Bh] [A23 - A16] [A15 - A8] [A7 - A0] [(D7 - D0)] [continuous...
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
 	HAL_SPI_TransmitReceive_DMA(hspi, cmd, RxBuf, data_byte_quantity + 4);
@@ -281,6 +304,7 @@ uint8_t is_flash_busy(SPI_HandleTypeDef *hspi) {
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
 	HAL_SPI_TransmitReceive(hspi, cmd, rxbuf, 2, HAL_MAX_DELAY);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+	spi1_done = 1;
 	return (rxbuf[1] & 0b00000001);
 	//When the RDY/BSY bit = 1, the device is busy in program/erase/write status register progress; when the RDY/BSY
 	//bit = 0, the device is not in program/erase/write status register progress.
@@ -299,7 +323,7 @@ void sector_erase(SPI_HandleTypeDef *hspi, uint32_t address) { //erases 4kb, fro
 	HAL_Delay(70); //datasheet said it takes about 70ms for the operation to complete
 }
 
-void block_erase(SPI_HandleTypeDef *hspi, uint32_t address) { //erases 64kb, from xxx000h to xxxFFFh. It takes about 70ms to complete
+void block_erase(SPI_HandleTypeDef *hspi, uint32_t address) { //erases 64kb, from xx0000h to xxFFFFh. It takes about 250ms to complete
 	uint8_t cmd[4] = {0xD8, 0x00, 0x00, 0x00}; // [20h] [A23 - A16] [A15 - A8] [A7 - A0]
 	cmd[1] = address>>16;
 	cmd[2] = address>>8;
@@ -418,6 +442,11 @@ float bits_to_float(uint32_t var) {
     return data.conv_float;
 }
 
+float round2(float val) {
+	return (roundf(val * 100) / 100);
+	//return val;
+}
+
 
 //--------------------------------------------------------------------------------------
 //--------------------------------------------------------------------------------------
@@ -465,35 +494,36 @@ void IMU_Calibration(SPI_HandleTypeDef *hspi, float *gyro_offset, float *acc0, i
 		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET); // CS LOW, C1 for bar, C0 for imu
 		HAL_SPI_TransmitReceive(hspi, cmd, rxbuf, 7, HAL_MAX_DELAY); // Read data
 		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET); // CS HIGH
-		gyro_cal[0] += ((int16_t)(rxbuf[1]<<8 | rxbuf[2])) /32767.0f *2000.0f;//x of IMU
-		gyro_cal[1] += ((int16_t)(rxbuf[3]<<8 | rxbuf[4])) /32767.0f *2000.0f;//y of IMU
-		gyro_cal[2] += ((int16_t)(rxbuf[5]<<8 | rxbuf[6])) /32767.0f *2000.0f;//z of IMU
+		gyro_cal[0] += ((int16_t)(rxbuf[1]<<8 | rxbuf[2])) / 16.4f;// /32767.0f *2000.0f;//x of IMU
+		gyro_cal[1] += ((int16_t)(rxbuf[3]<<8 | rxbuf[4])) / 16.4f;// / 16.4f;// /32767.0f *2000.0f;//y of IMU
+		gyro_cal[2] += ((int16_t)(rxbuf[5]<<8 | rxbuf[6])) / 16.4f;// /32767.0f *2000.0f;//z of IMU
 	}
 	gyro_offset[0] = gyro_cal[0]/n_cycles;
 	gyro_offset[1] = gyro_cal[1]/n_cycles;
 	gyro_offset[2] = gyro_cal[2]/n_cycles;
 
 	float acc_cal[3] = {};
-	uint8_t cmd2[7] = {(0x80 | 0x0b)}; //0x0b is the first gyro address
+	uint8_t cmd2[7] = {(0x80 | 0x0b)}; //0x0b is the first acc address
 	for (int i=0; i<n_cycles; i++) {
-			//read gyro (blocking reading)
-			HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET); // CS LOW, C1 for bar, C0 for imu
-			HAL_SPI_TransmitReceive(hspi, cmd2, rxbuf, 7, HAL_MAX_DELAY); // Read data
-			HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET); // CS HIGH
-			acc_cal[0] += ((int16_t)(rxbuf[1]<<8 | rxbuf[2])) /2047.0f * 1;//x of IMU
-			acc_cal[1] += ((int16_t)(rxbuf[3]<<8 | rxbuf[4])) /2047.0f * 1;//y of IMU
-			acc_cal[2] += ((int16_t)(rxbuf[5]<<8 | rxbuf[6])) /2047.0f * 1;//z of IMU
+		//read gyro (blocking reading)
+		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET); // CS LOW, C1 for bar, C0 for imu
+		HAL_SPI_TransmitReceive(hspi, cmd2, rxbuf, 7, HAL_MAX_DELAY); // Read data
+		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET); // CS HIGH
+		acc_cal[0] += ((int16_t)(rxbuf[1]<<8 | rxbuf[2])) /2048.0f * 1;//x of IMU
+		acc_cal[1] += ((int16_t)(rxbuf[3]<<8 | rxbuf[4])) /2048.0f * 1;//y of IMU
+		acc_cal[2] += ((int16_t)(rxbuf[5]<<8 | rxbuf[6])) /2048.0f * 1;//z of IMU
 	}
-	acc0[0] = acc_cal[0]/n_cycles;
+	acc0[0] = acc_cal[0]/n_cycles + 1;//assumes the right vector is [0;0;1]
 	acc0[1] = acc_cal[1]/n_cycles;
 	acc0[2] = acc_cal[2]/n_cycles;
+	acc0[3] = sqrt( pow(acc_cal[0],2) + pow(acc_cal[1],2) + pow(acc_cal[2],2))/n_cycles;
 }
 
 void get_gyro(uint8_t *IMU_tag_buff, float *gyro_offset, float *gyro) {
 	float gyro_raw[3];
-	gyro_raw[0] = ((int16_t)(IMU_tag_buff[9] <<8 | IMU_tag_buff[10])) /32767.0f *2000.0f;//x of IMU
-	gyro_raw[1] = ((int16_t)(IMU_tag_buff[11]<<8 | IMU_tag_buff[12])) /32767.0f *2000.0f;//y of IMU
-	gyro_raw[2] = ((int16_t)(IMU_tag_buff[13]<<8 | IMU_tag_buff[14])) /32767.0f *2000.0f;//z of IMU
+	gyro_raw[0] = ((int16_t)(IMU_tag_buff[9] <<8 | IMU_tag_buff[10])) / 16.4f;//32767.0f *2000.0f;//x of IMU
+	gyro_raw[1] = ((int16_t)(IMU_tag_buff[11]<<8 | IMU_tag_buff[12])) / 16.4f;//32767.0f *2000.0f;//y of IMU
+	gyro_raw[2] = ((int16_t)(IMU_tag_buff[13]<<8 | IMU_tag_buff[14])) / 16.4f;//32767.0f *2000.0f;//z of IMU
 	//Apply offsets calculated through calibration.
 	//OFFSETS REFER TO THE IMU REFERENCE FRAME
 	gyro_raw[0] -= gyro_offset[0];
@@ -509,26 +539,82 @@ void get_gyro(uint8_t *IMU_tag_buff, float *gyro_offset, float *gyro) {
 	gyro[1] *= PI/180.0f;
 	gyro[2] *= PI/180.0f;
 }
-void get_acc(uint8_t *IMU_tag_buff, float *acc0, float *acc) {
-	float acc_raw[3];
-	acc_raw[0] = ((int16_t)(IMU_tag_buff[3]<<8 | IMU_tag_buff[4])) /2047.0 * 1;;//x of IMU
-	acc_raw[1] = ((int16_t)(IMU_tag_buff[5]<<8 | IMU_tag_buff[6])) /2047.0 * 1;;//y of IMU
-	acc_raw[2] = ((int16_t)(IMU_tag_buff[7]<<8 | IMU_tag_buff[8])) /2047.0 * 1;;//z of IMU
+
+
+
+void get_acc(uint8_t *IMU_tag_buff, float *acc0, float *acc, float *acc_raw) {
+	//float acc_raw[3];
+	acc_raw[0] = ((int16_t)(IMU_tag_buff[3]<<8 | IMU_tag_buff[4])) /2048.0 * 1;;//x of IMU
+	acc_raw[1] = ((int16_t)(IMU_tag_buff[5]<<8 | IMU_tag_buff[6])) /2048.0 * 1;;//y of IMU
+	acc_raw[2] = ((int16_t)(IMU_tag_buff[7]<<8 | IMU_tag_buff[8])) /2048.0 * 1;;//z of IMU
 
 	//Apply offsets calculated through calibration.
 	//OFFSETS REFER TO THE IMU REFERENCE FRAME
 	acc_raw[0] -= acc0[0];
 	acc_raw[1] -= acc0[1];
 	acc_raw[2] -= acc0[2];
+	//acc_raw[0] /= acc0[3];
+	//acc_raw[1] /= acc0[3];
+	//acc_raw[2] /= acc0[3];
+
+	float acc_new[3];
 	//Rotate the IMU reference frame to the Rocket Reference frame
-	acc[0] =   acc_raw[2];//+X
-	acc[1] =   acc_raw[1];//+Y
-	acc[2] = - acc_raw[0];//+Z
+	acc_new[0] =   acc_raw[2];//+X
+	acc_new[1] =   acc_raw[1];//+Y
+	acc_new[2] = - acc_raw[0];//+Z
 
 	// [g] to [m/s^2]
-	acc[0] *= 9.80665;//g
-	acc[1] *= 9.80665;
-	acc[2] *= 9.80665;
+	acc_new[0] *= 9.80665;//g
+	acc_new[1] *= 9.80665;
+	acc_new[2] *= 9.80665;
+
+	//filter:
+	float k = 0.9;
+	acc[0] = k*acc[0] + (1-k) * acc_new[0];
+	acc[1] = k*acc[1] + (1-k) * acc_new[1];
+	acc[2] = k*acc[2] + (1-k) * acc_new[2];
+
+	//acc[0] = round2(acc[0]);
+	//acc[1] = round2(acc[1]);
+	//acc[2] = round2(acc[2]);
+}
+
+void get_vel_pos(float *pos_earth, float *vel_earth, float *acc_earth, uint32_t micro_elaps) {
+	double dt = micro_elaps/1e6;
+	/*
+	vel_earth[0] += dt * round2(acc_earth[0]);
+	vel_earth[1] += dt * round2(acc_earth[1]);
+	vel_earth[2] += dt * round2(acc_earth[2]);
+	pos_earth[0] += dt * round2(vel_earth[0]) + 0.5*round2(acc_earth[0])*pow(dt,2);
+	pos_earth[1] += dt * round2(vel_earth[1]) + 0.5*round2(acc_earth[1])*pow(dt,2);
+	pos_earth[2] += dt * round2(vel_earth[2]) + 0.5*round2(acc_earth[2])*pow(dt,2);*/
+
+	float a_thr = 0.05;
+	if ((-a_thr < acc_earth[0]) && (acc_earth[0] < a_thr)) acc_earth[0] = 0;
+	if ((-a_thr < acc_earth[1]) && (acc_earth[1] < a_thr)) acc_earth[1] = 0;
+	if ((-a_thr < acc_earth[2]) && (acc_earth[2] < a_thr)) acc_earth[2] = 0;
+
+	vel_earth[0] += dt * (acc_earth[0]);
+	vel_earth[1] += dt * (acc_earth[1]);
+	vel_earth[2] += dt * (acc_earth[2]);
+	pos_earth[0] += dt * (vel_earth[0]) + 0.5*(acc_earth[0])*pow(dt,2);
+	pos_earth[1] += dt * (vel_earth[1]) + 0.5*(acc_earth[1])*pow(dt,2);
+	pos_earth[2] += dt * (vel_earth[2]) + 0.5*(acc_earth[2])*pow(dt,2);
+}
+
+void get_earth_acc(float *vec, float *q, float *result) {
+	//q x vec x q*, same as target2earth, but removes g at the end
+	float vec2quat[4] = {0, vec[0], vec[1], vec[2]};
+	float conjq[4];
+	quat_conjugate(q,conjq);
+	float q_times_0vec[4];
+	quat_multiply(q, vec2quat, q_times_0vec);
+	float q_0vec_times_conjq[4];
+	quat_multiply(q_times_0vec, conjq, q_0vec_times_conjq);
+
+	result[0] = q_0vec_times_conjq[1];
+	result[1] = q_0vec_times_conjq[2];
+	result[2] = q_0vec_times_conjq[3] - 9.80665;
 }
 
 float get_press(uint8_t *Bar_pt_buff) {
@@ -587,6 +673,21 @@ void earth2body(float *q, float *vec, float *result) {
 	result[1] = conjq_0vec_times_q[2];
 	result[2] = conjq_0vec_times_q[3];
 }
+
+void body2earth(float *q, float *vec, float *result) {
+	//q x vec x q*, same as target2earth
+	float vec2quat[4] = {0, vec[0], vec[1], vec[2]};
+	float conjq[4];
+	quat_conjugate(q,conjq);
+	float q_times_0vec[4];
+	quat_multiply(q, vec2quat, q_times_0vec);
+	float q_0vec_times_conjq[4];
+	quat_multiply(q_times_0vec, conjq, q_0vec_times_conjq);
+	result[0] = q_0vec_times_conjq[1];
+	result[1] = q_0vec_times_conjq[2];
+	result[2] = q_0vec_times_conjq[3];
+}
+
 void target2earth(float *q, float *vec, float *result) {
 	//performs the active rotation q*(0, vec)*conj(q)
 	float vec2quat[4] = {0, vec[0], vec[1], vec[2]};
@@ -595,7 +696,7 @@ void target2earth(float *q, float *vec, float *result) {
 	float q_times_0vec[4];
 	quat_multiply(q, vec2quat, q_times_0vec);
 	float q_0vec_times_conjq[4];
-	quat_multiply(q_times_0vec,conjq, q_0vec_times_conjq);
+	quat_multiply(q_times_0vec, conjq, q_0vec_times_conjq);
 	result[0] = q_0vec_times_conjq[1];
 	result[1] = q_0vec_times_conjq[2];
 	result[2] = q_0vec_times_conjq[3];
@@ -1105,6 +1206,7 @@ float get_accelerometer_variance(SPI_HandleTypeDef *hspi, float *local_acc0, int
 	//reading just that, and instead reads everything (could be changed)
 	uint8_t local_tagBuff[15] = {};
 	float local_acc[3] = {};
+	float local_acc_raw[3] = {};
 	float acc_values[n_cycles];
 	float sum = 0;
 
@@ -1114,7 +1216,7 @@ float get_accelerometer_variance(SPI_HandleTypeDef *hspi, float *local_acc0, int
 		while (has_read == 0) { //checks if reading has happened in this current "for cycle"
 			if (is_SPI3_done()) { //if SPI3 is available (dma done) it tries to read. Otherwise it retries
 				IMU_readTempAccGyro(hspi, local_tagBuff);
-				get_acc(local_tagBuff, local_acc0, local_acc);
+				get_acc(local_tagBuff, local_acc0, local_acc, local_acc_raw);
 				acc_values[i] = local_acc[3];
 				has_read = 1; //changes flag
 			}
@@ -1167,6 +1269,54 @@ float get_barometer_variance(SPI_HandleTypeDef *hspi, int n_cycles) {
 	}
 	//return the variance
 	return (sum/n_cycles);
+}
+
+float filter_altitude(float bar_alt, float az_earth, uint32_t micro_elaps) {
+	static float p0  = 1;//initial estimate covariance
+	static float p1  = 0.1;
+	static float p10 = 0; //non diagonal term of P, assuming P is simmetric
+	const float q0 = 1e-4; //model noise
+	const float q1 = 1e-4;
+	const float r = 1000;//measurement noise. measured 0.02 for the altitude gotten from the barometer
+
+	static float x0;
+	static uint8_t initialized = 0;
+	if (!initialized) {
+		x0 = bar_alt;
+		initialized = 1;
+	}
+	static float x1 = 0;
+
+	float dt = micro_elaps / 1e6;
+	float u = az_earth;
+	float z = bar_alt;
+
+	float x0_est = x0 + x1*dt + u*0.5*dt*dt;
+	float x1_est = x1 + u*dt;
+
+	float p0_new  = p0  + q0 + dt*p10 + dt*(p10 + dt*p1);
+	float p10_new = p10 + dt*p1;
+	float p1_new  = p1  + q1;
+	p0  = p0_new;
+	p10 = p10_new;
+	p1  = p1_new;
+
+	static float k0;
+	static float k1;
+	k0 = p0  / (p0 + r);
+	k1 = p10 / (p0 + r);
+
+	x0 = x0_est - k0*(x0_est - z);
+	x1 = x1_est - k1*(x0_est - z);
+
+	p0_new  = p0  * (1-k0);
+	p10_new = p10 * (1-k0);
+	p1_new  = p1 - k1*p10;
+	p0  = p0_new;
+	p10 = p10_new;
+	p1  = p1_new;
+
+	return x0;
 }
 
 #endif

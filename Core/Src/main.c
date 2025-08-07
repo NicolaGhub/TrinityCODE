@@ -85,10 +85,14 @@ static void MX_TIM2_Init(void);
 
 uint8_t IMU_tag_buff[15] = {}; //temp, acc, gyro
 uint8_t Bar_pt_buff[6] = {};
-float gyro[3] = {0};
+float gyro[3] = {0};//body frame
 float gyro_offset[3] = {};
-float acc[3] = {};
-float acc_offset[3] = {};
+float acc_raw[3] = {};
+float acc[3] = {0,0,9.81};//body frame
+float acc_earth[3] = {};//earth frame
+float vel_earth[3] = {};//earth frame
+float pos_earth[3] = {};//earth frame
+float acc_offset[4] = {};//offset x,y,z and norm
 
 float body_quat[4] = {1,0,0,0};
 float target_quat[4] = {1,0,0,0};
@@ -101,9 +105,10 @@ float gammas[3] = {};
 float Forces[3] = {12,12,12};
 float ReqTorque[3] = {};
 
-float alt = 0;
+float alt = 0;//bar alt
+float filtered_alt = 0;
 #define ADC_CHANNEL_COUNT 4
-float voltages[ADC_CHANNEL_COUNT];        // Converted voltages
+float voltages[ADC_CHANNEL_COUNT] = {};        // Converted voltages
 long counter = 0;
 
 uint8_t TxBufA_with_cmd[4+256] = {0x02}; //tx flash buffers: 1*(cmd) + 3*(mem addr) + 256*(data)
@@ -180,7 +185,7 @@ int main(void)
 
   uint8_t who_am_i = 0;
 
-  uint16_t adc_dma_buf[ADC_CHANNEL_COUNT];  // Raw ADC data
+  uint16_t adc_dma_buf[ADC_CHANNEL_COUNT] = {};  // Raw ADC data
   HAL_ADC_Start_DMA(&hadc1, adc_dma_buf, ADC_CHANNEL_COUNT);
 
   int16_t temp_raw = 0;
@@ -207,11 +212,13 @@ int main(void)
   initIMU(&hspi3, IMU_tag_buff); //passes also the buffer address for later use
   initBar(&hspi3, Bar_pt_buff);
 
-  IMU_Calibration(&hspi3, gyro_offset, acc_offset, 5000); //SPI_HandleTypeDef *hspi, float *gyro_offset, float *acc0, int n_cycles
+  //two calibrations. the first is just to get the MEMS to temperature or operating contitions
+  IMU_Calibration(&hspi3, gyro_offset, acc_offset, 10000); //SPI_HandleTypeDef *hspi, float *gyro_offset, float *acc0, int n_cycles
+  IMU_Calibration(&hspi3, gyro_offset, acc_offset, 10000);
 
   //float barvar = get_barometer_variance(&hspi3, 10000); //got ~0.02
 
-  sector_erase(&hspi1, 0);//blocking, erases 4kb of data starting from address 0x00. Consider bock erase for 64kb
+  sector_erase(&hspi1, 0);//blocking, erases 4kb of data starting from address 0x00. Consider block erase for 64kb
 
   //NOR FLASH TRY CODE
   /*
@@ -264,9 +271,10 @@ int main(void)
       Error_Handler();
   }
 
+/*
   // Write text to file
   char text[] = "Hello from STM32!\r\n";
-  uint8_t datatry[4] = {1,2,3,4};
+  uint8_t datatry[6] = {0,1,0,2,3,4};
   //res = f_write(&file, text, strlen(text), &bw);
   res = f_write(&file, datatry, sizeof(datatry), &bw);
   if (res != FR_OK || bw == 0) {
@@ -275,10 +283,11 @@ int main(void)
   }
 
   //equivalent of flushing. Secures the data written but keeps the file open
-  f_sync(&file);
+  f_sync(&file);*/
+
 
   // Close the file
-  f_close(&file);
+  //f_close(&file);
 
   // Optional: unmount the filesystem
   //f_mount(NULL, "", 1);
@@ -295,7 +304,7 @@ int main(void)
   uint32_t toc=0;
   uint32_t elaps = 0;
   uint32_t micro_elaps = 0;
-  uint32_t write_faults = 0;
+  uint16_t write_faults = 0;
 
 
 
@@ -308,18 +317,10 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	counter += 1;
 	if (counter>=10000) {HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET);}
 
 	tic = HAL_GetTick();
 	tick = my_micros(&htim2);
-
-	typedef enum {
-	    //SPI3_IDLE = 0,
-	    SPI3_IMU_READING,
-	    SPI3_BAR_READING
-	} SPI3_LastReading;
-	static SPI3_LastReading spi3_LastReading = SPI3_BAR_READING;
 
 	typedef enum {
 	    FILLING_BUF_A,
@@ -327,57 +328,25 @@ int main(void)
 	} BufferState;
 	static BufferState bufferstate = FILLING_BUF_A;
 
-	static uint8_t loggingdata = 0;
-
+	/*
 	typedef enum {
 	    IDLE,
-	    FILLING_BUF_B
-	} BufferState;
-	static RocketState rocketstate = FILLING_BUF_A;
 
+	} RocketState;
+	static RocketState rocketstate = IDLE;
+*/
 
 	//READINGS
 	if (is_ADC_done()) {
 		ADC_to_voltages(adc_dma_buf,voltages);
+		HAL_ADC_Start_DMA(&hadc1,adc_dma_buf, 4);
 	}
-	HAL_ADC_Start_DMA(&hadc1,adc_dma_buf, 4);
+
 
 	if (is_SPI3_done()) {
 		read_IMU_Bar(&hspi3, IMU_tag_buff, Bar_pt_buff);
 	}
 
-	if (0) {
-		IMU_readTempAccGyro(&hspi3, IMU_tag_buff);
-	}
-
-	if (0) {
-		BAR_readPressureTemp(&hspi3, Bar_pt_buff);
-		//HAL_Delay(100);
-	}
-/*
-	switch (spi3_LastReading) { //alternates between IMU and Bar reading
-
-		case SPI3_IMU_READING:
-			if (is_SPI3_done()) {
-				//set_SPI3_availability(0);
-				BAR_readPressureTemp(&hspi3, Bar_pt_buff);
-				spi3_LastReading = SPI3_BAR_READING;
-			}
-			break;
-
-		case SPI3_BAR_READING:
-			if (is_SPI3_done()) {
-				//set_SPI3_availability(0);
-				//uint8_t local_buff[2];
-				//uint8_t mycmd[2] = {(0x39 | 0x80)};
-				//HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET);
-				//HAL_SPI_TransmitReceive_DMA(&hspi3, mycmd, local_buff, 2);
-				//HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET);
-				IMU_readTempAccGyro(&hspi3, IMU_tag_buff);
-				spi3_LastReading = SPI3_IMU_READING;
-			}
-			break;
-	}*/
 	static uint8_t all_engines = 0;
 	if (!all_engines) {
 		static uint8_t engine_state[3] = {};
@@ -391,10 +360,15 @@ int main(void)
 	}
 
 	get_gyro(IMU_tag_buff, gyro_offset, gyro);//processes gyro data by offsetting, and by bringing it to the right reference frame (IMU to rocket frame)
+	get_acc(IMU_tag_buff, acc_offset, acc, acc_raw);
+
 	gyro2quat_integration(gyro, body_quat, micro_elaps); //gets the body quaternion
 	gyro2quat_integration(target_gyro, target_quat, micro_elaps); //gets the target quaternion
 	get_relative_quat(body_quat, target_quat, relative_quat); //finds the relative quat between body and target
 	quat2axang(relative_quat, axang);
+
+	get_earth_acc(acc, body_quat, acc_earth);//gets the acceleration vector in the body frame, with acceleration of gravity removed
+	get_vel_pos(pos_earth, vel_earth, acc_earth, micro_elaps);
 
 	updateReqTorque(axang, gyro, target_gyro, body_quat, target_quat, ReqTorque, micro_elaps);
 	//updateReqTorque(axang, gyro, ReqTorque, micro_elaps);
@@ -402,55 +376,7 @@ int main(void)
 	get_angles_RMS_and_paraboloid(thetas, gammas, Forces, ReqTorque);
 	writeServos(thetas, gammas, &htim1, &htim3);
 
-	acc[0] = ((int16_t)(IMU_tag_buff[3]<<8 | IMU_tag_buff[4])) /2047.0 * 1;//x of IMU
-	acc[1] = ((int16_t)(IMU_tag_buff[5]<<8 | IMU_tag_buff[6])) /2047.0 * 1;//y of IMU
-	acc[2] = ((int16_t)(IMU_tag_buff[7]<<8 | IMU_tag_buff[8])) /2047.0 * 1;//z of IMU
 
-	if (0) {
-		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_RESET); // CS LOW, C1 for bar, C0 for imu
-		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET);
-		//uint8_t isok = (HAL_SPI_TransmitReceive(&hspi3, txBufbar, rx_data, 3, HAL_MAX_DELAY)==HAL_OK); // Read data
-		HAL_SPI_TransmitReceive_DMA(&hspi3, txBufbar, rx_data, 3);
-		HAL_Delay(100);
-		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET); // CS HIGH
-		temp_raw = (int16_t)((rx_data[2] << 8) | rx_data[1]);
-		temperature_bar = temp_raw / 480.0 + 42.5;
-	}
-
-	if (0) {
-		uint8_t TXpress[4] = {(0x80 | 0x28 | 0x40)};
-		uint8_t RXpress[4];
-		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_RESET); // CS LOW, C1 for bar, C0 for imu
-		uint8_t isok = (HAL_SPI_TransmitReceive(&hspi3, TXpress, RXpress, 4, HAL_MAX_DELAY)==HAL_OK); // Read data
-		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET); // CS HIGH
-		press_raw = (int32_t)((RXpress[3] << 16) | RXpress[2] << 8 | RXpress[1]);
-		press_bar = press_raw / 4096.0;
-	}
-
-	if (0) { //THIS SOMEHOW WORKS, BUT THE ONE IN THE LIBRARY DOESN'T
-		//TURNS OUT THE READING OF 6 REGISTERS IS WRONG??? READING JUST THE TEMPERATURE WORKS
-		//HAL_Delay(100);
-		set_SPI3_availability(0);
-		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET);
-		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_RESET);//CS LOW
-		temp_raw = (int16_t)((Bar_pt_buff[2] << 8) | Bar_pt_buff[1]);
-		temperature_bar = temp_raw / 480.0 + 42.5;
-
-		//static uint8_t txxBuffer[6] = {(0x80 | 0x40 | 28)}; //Read + Increment address + address
-		if(HAL_SPI_TransmitReceive_DMA(&hspi3, txBufbar, Bar_pt_buff, 3) == HAL_OK ) { //5 bytes of data, one of address
-			//return 1;
-		} else {
-			HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET);
-			//return 0;
-		}
-
-	}
-
-	if (0) { //THIS WORKS, TRY TO FIGURE OUT WHY ALSO READING THE PRESSURE IN A SINGLE BUFFER DOESN'T (sometimes it did work...)
-		BAR_readTemp(&hspi3, Bar_pt_buff);
-		temp_raw = (int16_t)((Bar_pt_buff[2] << 8) | Bar_pt_buff[1]);
-		temperature_bar = temp_raw / 480.0 + 42.5;
-	}
 	//Barometer computing
 	press_raw = (int32_t)((Bar_pt_buff[3] << 16) | Bar_pt_buff[2] << 8 | Bar_pt_buff[1]);
 	press_bar = press_raw / 4096.0;
@@ -461,16 +387,30 @@ int main(void)
 	temperature = temp_raw / 128.0 + 25.0; //IMU temperature conversion
 	corrected_press = (temperature + 273.15) / (temperature_bar + 273.15) * press_bar; //Barometer temperature readings are trash. Use pv=nrt to correct, using IMU's temperature
 
-	static const float T0 = 306; //T0 is the temperature at 0 meters level, in Kelvin
+	static const float T0 = 300.0; //T0 is the temperature at 0 meters level, in Kelvin
 	static const float RR = 287.05; //Gas constant for dry air [J / (kg * K) ]
-	static const float p0 = 1018; //Today's pressure at 0m level [hPa]
+	static const float p0 = 1015.5; //Today's pressure at 0m level [hPa] or [mbar]
 	static const float g0 = 9.80665; //No explanation needed, come on
 	alt = -T0*RR / (g0 * p0) * (press_bar - p0); //press to altitude formula. approximated even more through Taylor expansion, but it's fine for my altitude range
 
-	if (loggingdata == 1) {
+	filtered_alt = filter_altitude(alt, acc_earth[2], micro_elaps);//KALMAN
+
+
+
+	typedef enum {
+	    NOT_LOGGING,
+	    LOGGING_FLASH,
+		LOGGING_SD
+	} LoggingState;
+	static LoggingState loggingstate = LOGGING_FLASH;
+
+	if (counter>10&&counter<20) {loggingstate=LOGGING_SD;}
+	if (counter>20) {loggingstate=NOT_LOGGING;}
+
+	if (loggingstate == LOGGING_FLASH) {//logs to flash
 		static unsigned int fill_idx = 0; //to know at what index of the buffer we are at
-		static const unsigned int buffer_size = 256; //sizeof(TxBufA) / sizeof(TxBufA[0]);//assume BufA and BufB are of the same size. the division is added for "the concept", but the denominator has value 1
-		static const unsigned int packet_size = 12;//placeholder for now. consider calculating once, after the first data packet is created
+		static const unsigned int buffer_size = 256; //sizeof(TxBufA) / sizeof(TxBufA[0]);//DIVISION DOESNT WORK since txbufa is a pointer//assume BufA and BufB are of the same size. the division is added for "the concept", but the denominator has value 1
+		static const unsigned int packet_size = 100;//placeholder for now. consider calculating once, after the first data packet is created
 		static const unsigned int max_start_idx = buffer_size - packet_size; //max_idx at which we can start writing
 
 		if (fill_idx > max_start_idx) {//if the buffer is full or if it would overflow
@@ -479,11 +419,17 @@ int main(void)
 			//Selects the last used buffer, before we change the buffer state
 			uint8_t *WriteBuf = (bufferstate == FILLING_BUF_A) ? TxBufA_with_cmd : TxBufB_with_cmd;
 			if(is_SPI1_done()) {
-				flash_program(WriteBuf, &hspi1);
-			}
-			else {
-				write_faults += 1; //signals that one buffer was skipped
-			}
+				if (!is_flash_busy(&hspi1)) {
+					static uint32_t time_of_program = 0;
+					while( my_micros(&htim2)-time_of_program < 650) {}
+					flash_program(WriteBuf, &hspi1);
+					time_of_program = my_micros(&htim2);
+					//flash_program is currently non blocking, but takes 0.6ms. MAKE SURE THIS TIME HAS ELAPSED BEFORE ATTEMPTING A WRITE OPERATION
+					//The check can be done with a variable that checks how much time has passed, but this wouln't resolve the data overflow, and some of it would be loss
+					//To really resolve overflow, reduce the number of bytes that get written to the flash at each loop.
+					//HAL_Delay(2);
+				} else write_faults += 1; //signals that an attempt to page_program was done but the previous page_program wasn't completed
+			} else write_faults += 1; //signals that one buffer was skipped
 
 			bufferstate ^= 1; //flips buffer state with XOR gate (FILLING_BUF_A <----> FILLING_BUF_B)
 			fill_idx = 0;
@@ -494,14 +440,100 @@ int main(void)
 		//ALL THE SIZES COMBINED NEED TO ADD UP TO packet_size
 
 		//time and pacing data
-		memcpy(Buffer + fill_idx, &counter, sizeof(counter));
+		memcpy(Buffer + fill_idx, &counter, sizeof(counter)); //to , from , how many
 		fill_idx += sizeof(counter);
 
 		memcpy(Buffer + fill_idx, &tic, sizeof(tic));
 		fill_idx += sizeof(tic);
 
 		memcpy(Buffer + fill_idx, &micro_elaps, sizeof(micro_elaps));
-		fill_idx += sizeof(micro_elaps);
+		fill_idx += sizeof(micro_elaps);//4 bytes
+
+		//memcpy(Buffer + fill_idx, gyro_offset, sizeof(gyro_offset));//12 bytes
+		//fill_idx += sizeof(gyro_offset);
+		//memcpy(Buffer + fill_idx, acc_offset, sizeof(acc_offset));
+		//fill_idx += sizeof(acc_offset);
+
+		//memcpy(Buffer + fill_idx, gyro, sizeof(gyro));
+		//fill_idx += sizeof(gyro);
+		//memcpy(Buffer + fill_idx, acc_raw, sizeof(acc_raw));
+		//fill_idx += sizeof(acc_raw);
+		//memcpy(Buffer + fill_idx, acc, sizeof(acc));
+		//fill_idx += sizeof(acc);
+
+		memcpy(Buffer + fill_idx, IMU_tag_buff+1, sizeof(IMU_tag_buff)-1); //the first byte is empty
+		fill_idx += sizeof(IMU_tag_buff)-1;
+
+		//memcpy(Buffer + fill_idx, acc_earth, sizeof(acc_earth));
+		//fill_idx += sizeof(acc_earth);
+		//memcpy(Buffer + fill_idx, vel_earth, sizeof(vel_earth));
+		//fill_idx += sizeof(vel_earth);
+		//memcpy(Buffer + fill_idx, pos_earth, sizeof(pos_earth));
+		//fill_idx += sizeof(pos_earth);//9*12
+
+		//memcpy(Buffer + fill_idx, body_quat, sizeof(body_quat));//16 bytes
+		//fill_idx += sizeof(body_quat);
+		//memcpy(Buffer + fill_idx, target_quat, sizeof(target_quat));//16
+		//fill_idx += sizeof(target_quat);
+		memcpy(Buffer + fill_idx, target_gyro, sizeof(target_gyro));//12
+		fill_idx += sizeof(target_gyro);
+		//memcpy(Buffer + fill_idx, relative_quat, sizeof(relative_quat));//16
+		//fill_idx += sizeof(relative_quat);
+		//memcpy(Buffer + fill_idx, axang, sizeof(axang));//16
+		//fill_idx += sizeof(axang);
+
+		memcpy(Buffer + fill_idx, thetas, sizeof(thetas));//12
+		fill_idx += sizeof(thetas);
+		memcpy(Buffer + fill_idx, gammas, sizeof(gammas));//12
+		fill_idx += sizeof(gammas);
+		//memcpy(Buffer + fill_idx, Forces, sizeof(Forces));//12
+		//fill_idx += sizeof(Forces);
+		memcpy(Buffer + fill_idx, ReqTorque, sizeof(ReqTorque));//12
+		fill_idx += sizeof(ReqTorque);
+
+		memcpy(Buffer + fill_idx, voltages, sizeof(voltages));//16
+		fill_idx += sizeof(voltages);
+		//memcpy(Buffer + fill_idx, &alt, sizeof(alt));//4
+		//fill_idx += sizeof(alt);
+		memcpy(Buffer + fill_idx, &press_bar, sizeof(press_bar));//4
+		fill_idx += sizeof(press_bar);
+		memcpy(Buffer + fill_idx, &filtered_alt, sizeof(filtered_alt));//4
+		fill_idx += sizeof(filtered_alt);
+
+		memcpy(Buffer + fill_idx, &write_faults, sizeof(write_faults));//2
+		fill_idx += sizeof(write_faults);
+
+	}
+
+	if (loggingstate == LOGGING_SD) {
+
+		static uint16_t SD_faults = 0; //consider making this global so it can be logged
+
+		uint32_t last_addr = get_flash_add() + 255;//returns the last flash address at which we wrote a byte.
+		//get_flash_add gives the start of the page. +255 brings to the last byte, since every page_program writes 256 bytes
+		static uint32_t read_addr = 0; //add at which we want to read
+		uint32_t nbytes = 256;//Reading the flash is not limited to reading 256 bytes, so consider increasing this number. You would have to edit the function fast_read, and SDbuf_with_cmd
+		uint8_t SDbuf_with_cmd[256+5] = {};//fast read is +5, read is +4 //REMEMBER TO PLACE nbytes here correctly in the size
+		uint8_t *SDbuf = SDbuf_with_cmd + 5;
+
+		if (read_addr <= last_addr) { //if we haven't read everything that was written yet
+
+			if (is_SPI1_done()) {
+				if (!is_flash_busy(&hspi1)) { //put here for safety, but the RDY bit is not set to 0 when reading
+					fast_read_flash(SDbuf_with_cmd, nbytes, read_addr, &hspi1);
+					read_addr += nbytes;//increments read address by the number of bytes read
+				} else SD_faults+=1;
+			} else SD_faults+=1;
+
+			if (is_SPI1_done()) {
+				if (!is_flash_busy(&hspi1)) {
+					f_write(&file, SDbuf, nbytes, &bw); //fwrite doesnt set the spi1_done variable to 0, but it should be blocking so there shouldnt be any issue
+					f_sync(&file);
+				} else SD_faults+=1;
+			} else SD_faults+=1;
+		}
+
+		int abcd = 0;//placeholder to execute f_sync without exiting scope when using breakpoints
 
 	}
 

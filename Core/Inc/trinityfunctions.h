@@ -69,11 +69,13 @@ void flash_WriteEnable(SPI_HandleTypeDef *hspi);
 void sector_erase(SPI_HandleTypeDef *hspi, uint32_t address);
 void block_erase(SPI_HandleTypeDef *hspi, uint32_t address);
 void flash_program(uint8_t* Buf, SPI_HandleTypeDef *hspi);
-void fast_read_flash(uint8_t *RxBuf ,int data_byte_quantity, SPI_HandleTypeDef *hspi);
+uint32_t get_flash_add();
+void fast_read_flash(uint8_t *RxBuf ,uint32_t data_byte_quantity, uint32_t address, SPI_HandleTypeDef *hspi);
 void read_flash(uint8_t *RxBuf ,int data_byte_quantity, SPI_HandleTypeDef *hspi);
 
 uint32_t float_to_bits(float var);
 float bits_to_float(uint32_t var);
+float round2(float val);
 //----------------------------------------------------------------------------------------------
 //MATHEMATICAL
 /*
@@ -91,6 +93,8 @@ void quat_normalize(float* q);
 void quat_multiply(float *q1, float *q2, float *result);
 void quat_conjugate(float *q, float *result);
 void earth2body(float *q, float *vec, float *result);
+void body2earth(float *q, float *vec, float *result);
+void target2earth(float *q, float *vec, float *result);
 
 float theta2servo(float angle); // outer axis of gimbal
 float gamma2servo(float angle); // inner axis of gimbal
@@ -104,7 +108,9 @@ void get_parabVertex_angles(float *thetas, float *gammas, float *Forces, float *
 void get_angles_RMS_and_paraboloid(float *thetas, float *gammas, float *Forces, float *ReqTorque);
 
 void get_gyro(uint8_t *IMU_tag_buff, float *gyro_offset, float *gyro);//Incorporate gyro reading with calibration bias
-void get_acc(uint8_t *IMU_tag_buff, float *acc0, float *acc);
+void get_acc(uint8_t *IMU_tag_buff, float *acc0, float *acc, float *acc_raw);
+void get_vel_pos(float *pos_earth, float *vel_earth, float *acc_earth, uint32_t micro_elaps);
+void get_earth_acc(float *vec, float *q, float *result);
 float get_press(uint8_t *Bar_pt_buff);
 float get_bar_alt(uint8_t *Bar_pt_buff);
 void inject_gyro(float *gyro);
@@ -115,5 +121,6 @@ void writeServos(float *thetas, float *gammas, TIM_HandleTypeDef *htim1, TIM_Han
 //KALMAN
 float get_accelerometer_variance(SPI_HandleTypeDef *hspi, float *local_acc0, int n_cycles);
 float get_barometer_variance(SPI_HandleTypeDef *hspi, int n_cycles);
+float filter_altitude(float bar_alt, float az_earth, uint32_t micro_elaps);
 
 #endif /* INC_TRINITYFUNCTIONS_H_ */
