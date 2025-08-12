@@ -222,13 +222,18 @@ void ADC_to_voltages(uint16_t *ADCbuff, float *voltages) {
 	adc_done = 0; //tells me if a new data has been available since the last voltage conversion
 }
 
-uint8_t read_umbilical() {
-	uint8_t state = 0;
-	state = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12)) ? (state | 0b0001) : state;
-	state = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13)) ? (state | 0b0010) : state;
-	state = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14)) ? (state | 0b0100) : state;
-	state = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_15)) ? (state | 0b1000) : state;
+UmbilicalState read_umbilical() {
+	UmbilicalState state = 0;
+	//state = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12)) ? (state | 0b0001) : state;
+	//state = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13)) ? (state | 0b0010) : state;
+	state = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14)) ? (state | 0b01) : state; //actually used as input
+	state = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_15)) ? (state | 0b10) : state; //actually used as input
 	return state;
+}
+
+void write_umbilical(uint8_t pin12, uint8_t pin13) {
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, pin12 ? GPIO_PIN_SET : GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, pin13 ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
 /*
@@ -624,17 +629,25 @@ float get_press(uint8_t *Bar_pt_buff) {
 
 	return press_bar;
 }
-float get_bar_alt(uint8_t *Bar_pt_buff) {
 
-	uint32_t press_raw = (int32_t)((Bar_pt_buff[3] << 16) | Bar_pt_buff[2] << 8 | Bar_pt_buff[1]);
-	float press_bar = press_raw / 4096.0;
+float get_bar_temp(uint8_t *Bar_pt_buff) {
+	float temp_raw = (int16_t)((Bar_pt_buff[5] << 8) | Bar_pt_buff[4]);
+	float temp = temp_raw / 480.0 + 42.5;
+	return temp;
+}
+
+float get_bar_alt(float press) {
+
+	//uint32_t press_raw = (int32_t)((Bar_pt_buff[3] << 16) | Bar_pt_buff[2] << 8 | Bar_pt_buff[1]);
+	//float press_bar = press_raw / 4096.0;
 
 	static const float T0 = 306; //T0 is the temperature at 0 meters level, in Kelvin
 	static const float RR = 287.05; //Gas constant for dry air [J / (kg * K) ]
 	static const float p0 = 1018; //Today's pressure at 0m level [hPa]
 	static const float g0 = 9.80665; //No explanation needed, come on
-
-	float alt = -T0*RR / (g0 * p0) * (press_bar - p0); //press to altitude formula. approximated even more through Taylor expansion, but it's fine for my altitude range
+	//WARNING!!!! :
+	//press to altitude formula. Approximated through a Taylor expansion, but it's fine for my altitude range (up until ~5km)
+	float alt = -T0*RR / (g0 * p0) * (press - p0);
 	return alt;
 }
 
@@ -1183,7 +1196,7 @@ void writeServos(float *thetas, float *gammas, TIM_HandleTypeDef *htim1, TIM_Han
 	th3_temp = mapFloat(th3_temp, 0.0f, 90.0f, 649.0f, 1669.0f);
 	ga3_temp = mapFloat(ga3_temp, 0.0f, 90.0f, 649.0f, 1669.0f);
 
-	//SERVOS MUST BE CONNECTED BOTTOM TO TOP, SO THAT THE TIMER+CHANNEL CORRESPONDS TO THE RIGHT SERVO
+	//SERVOS MUST BE CONNECTED BOTTOM TO TOP (1 below, 2 middle, 3 top), SO THAT THE TIMER+CHANNEL CORRESPONDS TO THE RIGHT SERVO
 	__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_1, th1_temp);
 	__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_2, ga1_temp);
 	__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_3, th2_temp);
@@ -1252,7 +1265,8 @@ float get_barometer_variance(SPI_HandleTypeDef *hspi, int n_cycles) {
 		while (has_read == 0) { //checks if reading has happened in this current "for cycle"
 			if (is_SPI3_done()) { //if SPI3 is available (dma done) it tries to read. Otherwise it retries
 				BAR_readPressureTemp(hspi, ptBuff);
-				new_alt = get_bar_alt(ptBuff);
+				float pressure = get_press(ptBuff);
+				new_alt = get_bar_alt(pressure);
 				alt_values[i] = new_alt;
 				has_read = 1; //changes flag
 			}

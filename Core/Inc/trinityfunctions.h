@@ -11,6 +11,14 @@
 #include <stdint.h>
 #include <main.h>
 
+
+typedef enum {
+	NONE,
+	TEST,
+	LOG,
+	LAUNCH
+} UmbilicalState;
+
 //get micros tick
 uint32_t my_micros(TIM_HandleTypeDef *htim);
 
@@ -61,7 +69,8 @@ void ADC_to_voltages(uint16_t *ADCbuff, float *voltages);
 
 //GPIO readings
 //void readUmbilical(uint8_t *umbilicalstatus);
-uint8_t read_umbilical();
+UmbilicalState read_umbilical();
+void write_umbilical(uint8_t pin12, uint8_t pin13);
 
 //Flash Memory
 uint8_t is_flash_busy(SPI_HandleTypeDef *hspi);
@@ -112,7 +121,8 @@ void get_acc(uint8_t *IMU_tag_buff, float *acc0, float *acc, float *acc_raw);
 void get_vel_pos(float *pos_earth, float *vel_earth, float *acc_earth, uint32_t micro_elaps);
 void get_earth_acc(float *vec, float *q, float *result);
 float get_press(uint8_t *Bar_pt_buff);
-float get_bar_alt(uint8_t *Bar_pt_buff);
+float get_bar_temp(uint8_t *Bar_pt_buff);
+float get_bar_alt(float press);
 void inject_gyro(float *gyro);
 void inject_servo_angles();
 

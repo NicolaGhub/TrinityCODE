@@ -126,6 +126,21 @@ uint8_t RxBufB_with_cmd[4+256] = {};
 uint8_t* RxBufA = RxBufA_with_cmd + 4;
 uint8_t* RxBufB = RxBufB_with_cmd + 4;
 
+typedef enum {
+	NOT_LOGGING,
+	LOGGING_FLASH,
+	LOGGING_SD
+} LoggingState;
+LoggingState loggingstate = LOGGING_FLASH; //d
+
+typedef enum {
+	IDLE,
+	VECTORING,
+	ASCENT,
+	DESCENT
+} RocketState;
+RocketState rocketstate = IDLE;
+
 /* USER CODE END 0 */
 
 /**
@@ -174,16 +189,11 @@ int main(void)
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);//chute
 
   //HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
 
   HAL_TIM_Base_Start(&htim2); //timer to count microseconds
-
-  uint8_t txBuf[3] = {(0x09 | 0x80),0x00,0x00}; // 0F for bar, 75 for imu WHO_AM_I
-  uint8_t txBufbar[3] = {(0x2b | 0x80 | 0x40),0x00,0x00}; // 0F for bar, 75 for imu WHO_AM_I
-  uint8_t rx_data[3] = {0};
-
-  uint8_t who_am_i = 0;
 
   uint16_t adc_dma_buf[ADC_CHANNEL_COUNT] = {};  // Raw ADC data
   HAL_ADC_Start_DMA(&hadc1, adc_dma_buf, ADC_CHANNEL_COUNT);
@@ -192,33 +202,46 @@ int main(void)
   float temperature;
   float temperature_bar;
 
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET);  //chip select Barometer
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET);  //chip select IMU
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET); //chip select NOR Flash
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_11, GPIO_PIN_SET); //chip select SD
 
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); //output to pad pb12
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET); //output to pad pb13
 
-  uint8_t txBufWHO[2] = { 0x0F | 0x80, 0x00 };  // 0x0F | 0x80 (read WHO_AM_I)
-  uint8_t rxBufWHO[2] = { 0 };
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_RESET);
-  HAL_SPI_TransmitReceive(&hspi3, txBufWHO, rxBufWHO, 2, HAL_MAX_DELAY);
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_SET); //YELLOW LED ON TO SIGNAL HOLDING
 
-  uint8_t txBufWHOflash[4] = { 0x9F };  // 0x0F | 0x80
-  uint8_t rxBufWHOflash[4] = { 0 };
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
-  HAL_SPI_TransmitReceive(&hspi1, txBufWHOflash, rxBufWHOflash, 4, HAL_MAX_DELAY);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
-  //rxBufWHOflash should contain 1Fh 89h 01h. The first byte received is a dummy, and it contains 0xff because the MISO line is pulled high through a resistor (because the SD on the same line needed it)
+  /*
+██╗  ██╗ ██████╗ ██╗     ██████╗ ██╗███╗   ██╗ ██████╗
+██║  ██║██╔═══██╗██║     ██╔══██╗██║████╗  ██║██╔════╝
+███████║██║   ██║██║     ██║  ██║██║██╔██╗ ██║██║  ███╗
+██╔══██║██║   ██║██║     ██║  ██║██║██║╚██╗██║██║   ██║
+██║  ██║╚██████╔╝███████╗██████╔╝██║██║ ╚████║╚██████╔╝
+╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═════╝ ╚═╝╚═╝  ╚═══╝ ╚═════╝
+*/
+  //blocking the execution unless the state isn't "NONE" anymore
+  UmbilicalState umb_input = NONE;
+  while (umb_input == NONE) {
+	  UmbilicalState temp_umb_input = read_umbilical();
+	  HAL_Delay(100);
+	  if (temp_umb_input == read_umbilical()) {
+		  umb_input = temp_umb_input; //double reading to be sure the command is correctly read
+	  }
+  }
+
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET); //YELLOW LED OFF
 
   initIMU(&hspi3, IMU_tag_buff); //passes also the buffer address for later use
   initBar(&hspi3, Bar_pt_buff);
 
-  //two calibrations. the first is just to get the MEMS to temperature or operating contitions
+  //two calibrations. The first is just to get the MEMS to temperature or operating contitions
   IMU_Calibration(&hspi3, gyro_offset, acc_offset, 10000); //SPI_HandleTypeDef *hspi, float *gyro_offset, float *acc0, int n_cycles
   IMU_Calibration(&hspi3, gyro_offset, acc_offset, 10000);
 
   //float barvar = get_barometer_variance(&hspi3, 10000); //got ~0.02
 
-  sector_erase(&hspi1, 0);//blocking, erases 4kb of data starting from address 0x00. Consider block erase for 64kb
+  if (umb_input == LAUNCH) sector_erase(&hspi1, 0);//blocking, erases 4kb of data starting from address 0x00. Consider block erase for 64kb
 
   //NOR FLASH TRY CODE
   /*
@@ -249,13 +272,10 @@ int main(void)
   //blog post made by the maker of the library: https://01001000.xyz/2020-08-09-Tutorial-STM32CubeIDE-SD-card/
   //library used for SD CARD: https://github.com/kiwih/cubeide-sd-card
   //Video used for SD CARD: https://youtu.be/spVIZO-jbxE?si=KLvULVrA2ofx23bV
-
-
   FATFS fs;       // File system object
   FIL file;       // File object
   FRESULT res;    // FatFS result type
   UINT bw;        // Bytes written
-
   HAL_Delay(1000);
   // Mount the filesystem
   res = f_mount(&fs, "", 1);
@@ -263,12 +283,19 @@ int main(void)
       // Handle error (e.g., no card present)
       Error_Handler();
   }
-
   // Open or create file
-  res = f_open(&file, "data.txt", FA_CREATE_ALWAYS | FA_WRITE);
-  if (res != FR_OK) {
-      // Handle file open error
-      Error_Handler();
+  if (umb_input == LAUNCH) {
+	  res = f_open(&file, "data.txt", FA_CREATE_ALWAYS | FA_WRITE);
+	  if (res != FR_OK) {
+		  // Handle file open error
+		  Error_Handler();
+	  }
+  } else {
+	  res = f_open(&file, "copy.txt", FA_CREATE_ALWAYS | FA_WRITE);
+	  if (res != FR_OK) {
+		  // Handle file open error
+		  Error_Handler();
+	  }
   }
 
 /*
@@ -293,34 +320,40 @@ int main(void)
   //f_mount(NULL, "", 1);
 
 
-  float press_bar = 0;
-  int32_t press_raw = 0;
-  float corrected_press = 0;
+	float press_bar = 0;
+	int32_t press_raw = 0;
+	float corrected_press = 0;
 
-  uint32_t counter = 0;
-  uint32_t tick = 0;
-  uint32_t tock = 0;
-  uint32_t tic=0;
-  uint32_t toc=0;
-  uint32_t elaps = 0;
-  uint32_t micro_elaps = 0;
-  uint16_t write_faults = 0;
-
-
+	uint32_t counter = 0;
+	uint32_t tick = 0;
+	uint32_t tock = 0;
+	uint32_t tic=0;
+	uint32_t toc=0;
+	uint32_t elaps = 0;
+	uint32_t micro_elaps = 0;
+	uint16_t write_faults = 0;
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  if (umb_input == LAUNCH) {
+	  //good to go
+	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET); //output to pad pb12
+	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET); //output to pad pb13 GOOD TO GO FOR LAUNCH
+	  //indicator led
+	  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET); //RED LED ON
+  }
+
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	if (counter>=10000) {HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET);}
+	if (counter>=10000) {HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_RESET);} //RED LED OFF
 
-	tic = HAL_GetTick();
-	tick = my_micros(&htim2);
+	tic = HAL_GetTick(); //millis
+	tick = my_micros(&htim2); //micros
 
 	typedef enum {
 	    FILLING_BUF_A,
@@ -328,20 +361,11 @@ int main(void)
 	} BufferState;
 	static BufferState bufferstate = FILLING_BUF_A;
 
-	/*
-	typedef enum {
-	    IDLE,
-
-	} RocketState;
-	static RocketState rocketstate = IDLE;
-*/
-
 	//READINGS
 	if (is_ADC_done()) {
 		ADC_to_voltages(adc_dma_buf,voltages);
 		HAL_ADC_Start_DMA(&hadc1,adc_dma_buf, 4);
 	}
-
 
 	if (is_SPI3_done()) {
 		read_IMU_Bar(&hspi3, IMU_tag_buff, Bar_pt_buff);
@@ -354,7 +378,7 @@ int main(void)
 			if (voltages[i]>=0.4) {engine_state[i] = 1;};
 		}
 		if ((engine_state[0]+engine_state[1]+engine_state[2])==3) {
-			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2, GPIO_PIN_SET);
+			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2, GPIO_PIN_SET); //BLUE LED ON
 			all_engines = 1;
 		}
 	}
@@ -371,38 +395,25 @@ int main(void)
 	get_vel_pos(pos_earth, vel_earth, acc_earth, micro_elaps);
 
 	updateReqTorque(axang, gyro, target_gyro, body_quat, target_quat, ReqTorque, micro_elaps);
-	//updateReqTorque(axang, gyro, ReqTorque, micro_elaps);
 	//get_parabVertex_angles(thetas, gammas, Forces, ReqTorque);
 	get_angles_RMS_and_paraboloid(thetas, gammas, Forces, ReqTorque);
-	writeServos(thetas, gammas, &htim1, &htim3);
+	writeServos(thetas, gammas, &htim1, &htim3); //refers just to the 6 thrust vectoring servos, not to the parachute deploying servo
 
 
 	//Barometer computing
-	press_raw = (int32_t)((Bar_pt_buff[3] << 16) | Bar_pt_buff[2] << 8 | Bar_pt_buff[1]);
-	press_bar = press_raw / 4096.0;
-	temp_raw = (int16_t)((Bar_pt_buff[5] << 8) | Bar_pt_buff[4]);
-	temperature_bar = temp_raw / 480.0 + 42.5;
+	press_bar = get_press(Bar_pt_buff);
+	temperature_bar = get_bar_temp(Bar_pt_buff);
 	//IMU temp
 	temp_raw = (int16_t)((IMU_tag_buff[1] << 8) | IMU_tag_buff[2]);//IMU temp bytes
 	temperature = temp_raw / 128.0 + 25.0; //IMU temperature conversion
 	corrected_press = (temperature + 273.15) / (temperature_bar + 273.15) * press_bar; //Barometer temperature readings are trash. Use pv=nrt to correct, using IMU's temperature
 
-	static const float T0 = 300.0; //T0 is the temperature at 0 meters level, in Kelvin
-	static const float RR = 287.05; //Gas constant for dry air [J / (kg * K) ]
-	static const float p0 = 1015.5; //Today's pressure at 0m level [hPa] or [mbar]
-	static const float g0 = 9.80665; //No explanation needed, come on
-	alt = -T0*RR / (g0 * p0) * (press_bar - p0); //press to altitude formula. approximated even more through Taylor expansion, but it's fine for my altitude range
-
-	filtered_alt = filter_altitude(alt, acc_earth[2], micro_elaps);//KALMAN
+	alt = get_bar_alt(press_bar);
+	filtered_alt = filter_altitude(alt, acc_earth[2], micro_elaps);//KALMAN. Accelerometer is used as the control input and for the estimate state. barometer is used as the measurement
 
 
 
-	typedef enum {
-	    NOT_LOGGING,
-	    LOGGING_FLASH,
-		LOGGING_SD
-	} LoggingState;
-	static LoggingState loggingstate = LOGGING_FLASH;
+
 
 	if (counter>10&&counter<20) {loggingstate=LOGGING_SD;}
 	if (counter>20) {loggingstate=NOT_LOGGING;}
@@ -413,7 +424,7 @@ int main(void)
 		static const unsigned int packet_size = 100;//placeholder for now. consider calculating once, after the first data packet is created
 		static const unsigned int max_start_idx = buffer_size - packet_size; //max_idx at which we can start writing
 
-		if (fill_idx > max_start_idx) {//if the buffer is full or if it would overflow
+		if (fill_idx > max_start_idx) {//if the buffer is full or if it would overflow when writing
 
 			//if the execution enters here, then the last used buffer is good to go to be written.
 			//Selects the last used buffer, before we change the buffer state
@@ -425,7 +436,7 @@ int main(void)
 					flash_program(WriteBuf, &hspi1);
 					time_of_program = my_micros(&htim2);
 					//flash_program is currently non blocking, but takes 0.6ms. MAKE SURE THIS TIME HAS ELAPSED BEFORE ATTEMPTING A WRITE OPERATION
-					//The check can be done with a variable that checks how much time has passed, but this wouln't resolve the data overflow, and some of it would be loss
+					//The check can be done with a variable that checks how much time has passed, but this wouln't resolve the data overflow, and some of it would be loss.
 					//To really resolve overflow, reduce the number of bytes that get written to the flash at each loop.
 					//HAL_Delay(2);
 				} else write_faults += 1; //signals that an attempt to page_program was done but the previous page_program wasn't completed
@@ -532,8 +543,6 @@ int main(void)
 				} else SD_faults+=1;
 			} else SD_faults+=1;
 		}
-
-		int abcd = 0;//placeholder to execute f_sync without exiting scope when using breakpoints
 
 	}
 
@@ -1036,7 +1045,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_1, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_14|GPIO_PIN_15
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13
                           |GPIO_PIN_4, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
@@ -1058,19 +1067,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB10 PB11 PB14 PB15
+  /*Configure GPIO pins : PB10 PB11 PB12 PB13
                            PB4 */
-  GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_14|GPIO_PIN_15
+  GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13
                           |GPIO_PIN_4;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB12 PB13 */
-  GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13;
+  /*Configure GPIO pins : PB14 PB15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_14|GPIO_PIN_15;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PA12 PA15 */
