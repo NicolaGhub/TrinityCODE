@@ -79,6 +79,7 @@ void sector_erase(SPI_HandleTypeDef *hspi, uint32_t address);
 void block_erase(SPI_HandleTypeDef *hspi, uint32_t address);
 void flash_program(uint8_t* Buf, SPI_HandleTypeDef *hspi);
 uint32_t get_flash_add();
+void set_flash_add(uint32_t address);
 void fast_read_flash(uint8_t *RxBuf ,uint32_t data_byte_quantity, uint32_t address, SPI_HandleTypeDef *hspi);
 void read_flash(uint8_t *RxBuf ,int data_byte_quantity, SPI_HandleTypeDef *hspi);
 
@@ -114,7 +115,7 @@ void quat2axang(float *quat, float *axang);
 void updateReqTorque(float *axang, float *gyro, float *target_gyro, float *body_quat, float *target_quat, float *ReqTorque, uint32_t micro_elaps);
 
 void get_parabVertex_angles(float *thetas, float *gammas, float *Forces, float *ReqTorque);
-void get_angles_RMS_and_paraboloid(float *thetas, float *gammas, float *Forces, float *ReqTorque);
+void get_angles_RMS_and_paraboloid(float *thetas, float *gammas, float *Forces, float *ReqTorque, float* diff);
 
 void get_gyro(uint8_t *IMU_tag_buff, float *gyro_offset, float *gyro);//Incorporate gyro reading with calibration bias
 void get_acc(uint8_t *IMU_tag_buff, float *acc0, float *acc, float *acc_raw);

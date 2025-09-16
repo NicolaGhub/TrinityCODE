@@ -24,17 +24,17 @@ static volatile uint8_t adc_done  = 1;
 
 static const float 	K = 0.05,//angle minimazation coefficient
 					KP = 20.0f,//PID gains
-					KI = 0.0f,//40.0f,
+					KI = 40.0f,
 					KD = 10.0f,
 					R_gain_x = 1.0f,//gains of req torque vector
 					R_gain_y = 1.0f,
 					R_gain_z = 4.0f,
-					Ix = 0.0387f,//inertia
-					Iy = 0.0387f,
-					Iz = 0.0008f,
-					lx = 0.021234f,//components of vector from CM to Motor Force
+					Ix = 0.06959f,//inertia
+					Iy = 0.06709f,//inertia
+					Iz = 0.0007898f,//inertia
+					lx = 0.021234f,//components of vector from CM to Motor Force applied by motor number 1. The others will then be calculated by rotating it by 120 & 240deg
 					ly = -0.014f,
-					lz = -0.2f;
+					lz = -0.2475f;
 
 void initIMU(SPI_HandleTypeDef *hspi, uint8_t *tagBuff) { //+-2000 deg/s, +-16g
 	spi3_done = 0;
@@ -265,6 +265,11 @@ void flash_program(uint8_t* Buf, SPI_HandleTypeDef *hspi) {
 	static uint32_t n_cycles = 0;
 
 	current_address = 0x00+ 256*n_cycles; //sets the address to be increased of 256 bytes after the last page program sequence
+	if (current_address > (0xFFFFFF - 255)) {//overflow management
+		current_address = 0xFFFFFF;
+		return;
+	}
+
 	Buf[1] = current_address >> 16; //since Buf contains uint8_t, Buf[1] should truncate the shifted address
 	Buf[2] = current_address >> 8;
 	Buf[3] = current_address;
@@ -277,6 +282,11 @@ void flash_program(uint8_t* Buf, SPI_HandleTypeDef *hspi) {
 
 uint32_t get_flash_add() {
 	return current_address; //returns the last flash address at which we wrote a page
+}
+
+void set_flash_add(uint32_t address) {
+	//sets the last address at which the readings will stop at
+	current_address = address;
 }
 
 void fast_read_flash(uint8_t *RxBuf ,uint32_t data_byte_quantity, uint32_t address, SPI_HandleTypeDef *hspi) {
@@ -333,11 +343,14 @@ void block_erase(SPI_HandleTypeDef *hspi, uint32_t address) { //erases 64kb, fro
 	cmd[1] = address>>16;
 	cmd[2] = address>>8;
 	cmd[3] = address;
+	while (is_flash_busy(hspi)) {
+		HAL_Delay(10);
+	}
 	flash_WriteEnable(hspi); //blocking
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
 	HAL_SPI_Transmit(hspi, cmd, 4, HAL_MAX_DELAY);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
-	HAL_Delay(250); //datasheet said it takes about 250ms for the operation to complete
+	//HAL_Delay(250); //datasheet said it takes about 250ms for the operation to complete
 }
 
 //--------------------------------------------------
@@ -641,9 +654,9 @@ float get_bar_alt(float press) {
 	//uint32_t press_raw = (int32_t)((Bar_pt_buff[3] << 16) | Bar_pt_buff[2] << 8 | Bar_pt_buff[1]);
 	//float press_bar = press_raw / 4096.0;
 
-	static const float T0 = 306; //T0 is the temperature at 0 meters level, in Kelvin
+	static const float T0 = 298; //T0 is the temperature at 0 meters level, in Kelvin
 	static const float RR = 287.05; //Gas constant for dry air [J / (kg * K) ]
-	static const float p0 = 1018; //Today's pressure at 0m level [hPa]
+	static const float p0 = 1013; //Today's pressure at 0m level [hPa]
 	static const float g0 = 9.80665; //No explanation needed, come on
 	//WARNING!!!! :
 	//press to altitude formula. Approximated through a Taylor expansion, but it's fine for my altitude range (up until ~5km)
@@ -804,6 +817,15 @@ void updateReqTorque(float *axang, float *gyro, float *target_gyro, float *body_
 	integral_y += prop_y*(micro_elaps/1e6);
 	integral_z += prop_z*(micro_elaps/1e6);
 
+	//Anti windup
+	const float intsat = 0.1;
+	if (integral_x < -intsat)            integral_x = -intsat;
+	if (integral_x >  intsat)            integral_x =  intsat;
+	if (integral_y < -intsat)            integral_y = -intsat;
+	if (integral_y >  intsat)            integral_y =  intsat;
+	if (integral_z < -intsat)            integral_z = -intsat;
+	if (integral_z >  intsat)            integral_z =  intsat;
+
 	//DERIVATIVE PART
 	//currently the target_gyro is expressed in the target frame, so we bring it to the body frame by 2 rotations:
 	float target_gyro_earth[3];
@@ -946,7 +968,7 @@ void get_parabVertex_angles(float *thetas, float *gammas, float *Forces, float *
 	gammas[2] = ga3;
 }
 
-void get_angles_RMS_and_paraboloid(float *thetas, float *gammas, float *Forces, float *ReqTorque) {
+void get_angles_RMS_and_paraboloid(float *thetas, float *gammas, float *Forces, float *ReqTorque, float* diff_pointer) {
 	//assignments
 	float th1 = thetas[0];
 	float th2 = thetas[1];
@@ -1141,6 +1163,8 @@ void get_angles_RMS_and_paraboloid(float *thetas, float *gammas, float *Forces, 
 	gammas[0] = ga1;
 	gammas[1] = ga2;
 	gammas[2] = ga3;
+
+	*diff_pointer = diff;
 }
 
 
@@ -1178,6 +1202,7 @@ void writeServos(float *thetas, float *gammas, TIM_HandleTypeDef *htim1, TIM_Han
 	ga2_temp = gamma2servo(ga2_temp);
 	ga3_temp = gamma2servo(ga3_temp);
 
+	//OLD
 	//SERVO ANGLE TO PULSE DURATION
 	//By calibrating the servos I got:
 	//microseconds pulse duration associated to 0 degrees and to 90 degrees position, respectively
@@ -1189,20 +1214,46 @@ void writeServos(float *thetas, float *gammas, TIM_HandleTypeDef *htim1, TIM_Han
 	//inner 2(ga2)	|	550 |1525	|
 	//outer 3(th3)	|	649 |1669	|
 	//inner 3(ga3)	|	649 |1669	|
-	th1_temp = mapFloat(th1_temp, 0.0f, 90.0f, 583.0f, 1561.0f);
-	ga1_temp = mapFloat(ga1_temp, 0.0f, 90.0f, 622.0f, 1617.0f);
-	th2_temp = mapFloat(th2_temp, 0.0f, 90.0f, 715.0f, 1785.0f);
-	ga2_temp = mapFloat(ga2_temp, 0.0f, 90.0f, 550.0f, 1525.0f);
-	th3_temp = mapFloat(th3_temp, 0.0f, 90.0f, 649.0f, 1669.0f);
-	ga3_temp = mapFloat(ga3_temp, 0.0f, 90.0f, 649.0f, 1669.0f);
 
+	//th1_temp = mapFloat(th1_temp, 0.0f, 90.0f, 583.0f, 1561.0f);
+	//ga1_temp = mapFloat(ga1_temp, 0.0f, 90.0f, 622.0f, 1617.0f);
+	//th2_temp = mapFloat(th2_temp, 0.0f, 90.0f, 715.0f, 1785.0f);
+	//ga2_temp = mapFloat(ga2_temp, 0.0f, 90.0f, 550.0f, 1525.0f);
+	//th3_temp = mapFloat(th3_temp, 0.0f, 90.0f, 649.0f, 1669.0f);
+	//ga3_temp = mapFloat(ga3_temp, 0.0f, 90.0f, 649.0f, 1669.0f);
+
+	//NEW
+	//redone with new servos bought after the first static test on gyroscopic mount
+	//outer 1(th1)		600 1550
+	//inner 1(ga1)		680 1660
+	//outer 2(th2)		650 1660
+	//inner 2(ga2)		580 1550
+	//outer 3(th3)		730 1680
+	//inner 3(ga3)		550 1520
+	th1_temp = mapFloat(th1_temp, 0.0f, 90.0f, 600.0f, 1550.0f);
+	ga1_temp = mapFloat(ga1_temp, 0.0f, 90.0f, 680.0f, 1660.0f);
+	th2_temp = mapFloat(th2_temp, 0.0f, 90.0f, 650.0f, 1660.0f);
+	ga2_temp = mapFloat(ga2_temp, 0.0f, 90.0f, 580.0f, 1550.0f);
+	th3_temp = mapFloat(th3_temp, 0.0f, 90.0f, 730.0f, 1680.0f);
+	ga3_temp = mapFloat(ga3_temp, 0.0f, 90.0f, 550.0f, 1520.0f);
+
+	//OLD
 	//SERVOS MUST BE CONNECTED BOTTOM TO TOP (1 below, 2 middle, 3 top), SO THAT THE TIMER+CHANNEL CORRESPONDS TO THE RIGHT SERVO
-	__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_1, th1_temp);
-	__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_2, ga1_temp);
-	__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_3, th2_temp);
-	__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_4, ga2_temp);
-	__HAL_TIM_SET_COMPARE(htim1, TIM_CHANNEL_1, th3_temp);
-	__HAL_TIM_SET_COMPARE(htim1, TIM_CHANNEL_2, ga3_temp);
+	//__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_1, th1_temp);
+	//__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_2, ga1_temp);
+	//__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_3, th2_temp);
+	//__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_4, ga2_temp);
+	//__HAL_TIM_SET_COMPARE(htim1, TIM_CHANNEL_1, th3_temp);
+	//__HAL_TIM_SET_COMPARE(htim1, TIM_CHANNEL_2, ga3_temp);
+
+	//NEW
+	//ordered bottom to top
+	__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_1, ga3_temp);
+	__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_2, th3_temp);
+	__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_3, ga2_temp);
+	__HAL_TIM_SET_COMPARE(htim3, TIM_CHANNEL_4, th2_temp);
+	__HAL_TIM_SET_COMPARE(htim1, TIM_CHANNEL_1, ga1_temp);
+	__HAL_TIM_SET_COMPARE(htim1, TIM_CHANNEL_2, th1_temp);
 }
 
 /*

@@ -88,7 +88,7 @@ uint8_t Bar_pt_buff[6] = {};
 float gyro[3] = {0};//body frame
 float gyro_offset[3] = {};
 float acc_raw[3] = {};
-float acc[3] = {0,0,9.81};//body frame
+float acc[3] = {0,0,9.80665};//body frame. initialized like this since it goes through a complementary filter
 float acc_earth[3] = {};//earth frame
 float vel_earth[3] = {};//earth frame
 float pos_earth[3] = {};//earth frame
@@ -102,8 +102,9 @@ float axang[4] = {};
 
 float thetas[3] = {};
 float gammas[3] = {};
-float Forces[3] = {12,12,12};
+float Forces[3] = {};//{12,12,12};
 float ReqTorque[3] = {};
+float diff = 0;
 
 float alt = 0;//bar alt
 float filtered_alt = 0;
@@ -131,7 +132,7 @@ typedef enum {
 	LOGGING_FLASH,
 	LOGGING_SD
 } LoggingState;
-LoggingState loggingstate = LOGGING_FLASH; //d
+LoggingState loggingstate = NOT_LOGGING; //d
 
 typedef enum {
 	IDLE,
@@ -212,6 +213,8 @@ int main(void)
 
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_SET); //YELLOW LED ON TO SIGNAL HOLDING
 
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 1900);//close chute
+
   /*
 ██╗  ██╗ ██████╗ ██╗     ██████╗ ██╗███╗   ██╗ ██████╗
 ██║  ██║██╔═══██╗██║     ██╔══██╗██║████╗  ██║██╔════╝
@@ -222,26 +225,43 @@ int main(void)
 */
   //blocking the execution unless the state isn't "NONE" anymore
   UmbilicalState umb_input = NONE;
+  umb_input = TEST; //bypass for debugging
   while (umb_input == NONE) {
 	  UmbilicalState temp_umb_input = read_umbilical();
-	  HAL_Delay(100);
+	  HAL_Delay(500);
 	  if (temp_umb_input == read_umbilical()) {
 		  umb_input = temp_umb_input; //double reading to be sure the command is correctly read
 	  }
   }
+
+  //if (umb_input == TEST) {umb_input = LAUNCH;} //bypass since one gpio got unsoldered (faulty)
 
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET); //YELLOW LED OFF
 
   initIMU(&hspi3, IMU_tag_buff); //passes also the buffer address for later use
   initBar(&hspi3, Bar_pt_buff);
 
+  //float barvar = get_barometer_variance(&hspi3, 10000); //got ~0.02
+
+  if (umb_input == LAUNCH) {
+	  block_erase(&hspi1, 0);//blocking, erases 64kb of data starting from address 0x00
+	  loggingstate = LOGGING_FLASH;
+	  //takes about 12 secs
+	  for (int nblock = 0; nblock < 50; nblock++) { //flash erase cycles
+		  block_erase(&hspi1, nblock*0x10000);//delay incorporated in the function (250ms)
+		  HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2); //BLUE LED TOGGLE
+	  }
+	  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2, GPIO_PIN_RESET); //BLUE LED OFF
+  }
+
+  if (umb_input == LOG) {
+		loggingstate=LOGGING_SD;
+		set_flash_add(0xFFFFFF);//reads up all the flash
+  }
+
   //two calibrations. The first is just to get the MEMS to temperature or operating contitions
   IMU_Calibration(&hspi3, gyro_offset, acc_offset, 10000); //SPI_HandleTypeDef *hspi, float *gyro_offset, float *acc0, int n_cycles
   IMU_Calibration(&hspi3, gyro_offset, acc_offset, 10000);
-
-  //float barvar = get_barometer_variance(&hspi3, 10000); //got ~0.02
-
-  if (umb_input == LAUNCH) sector_erase(&hspi1, 0);//blocking, erases 4kb of data starting from address 0x00. Consider block erase for 64kb
 
   //NOR FLASH TRY CODE
   /*
@@ -274,8 +294,10 @@ int main(void)
   //Video used for SD CARD: https://youtu.be/spVIZO-jbxE?si=KLvULVrA2ofx23bV
   FATFS fs;       // File system object
   FIL file;       // File object
+  FIL file2;
   FRESULT res;    // FatFS result type
   UINT bw;        // Bytes written
+  UINT br;        // Bytes read
   HAL_Delay(1000);
   // Mount the filesystem
   res = f_mount(&fs, "", 1);
@@ -290,8 +312,19 @@ int main(void)
 		  // Handle file open error
 		  Error_Handler();
 	  }
-  } else {
-	  res = f_open(&file, "copy.txt", FA_CREATE_ALWAYS | FA_WRITE);
+  } else if (umb_input == LOG) {
+	  res = f_open(&file, "log.txt", FA_CREATE_ALWAYS | FA_WRITE);
+	  if (res != FR_OK) {
+		  // Handle file open error
+		  Error_Handler();
+	  }
+  } else if (umb_input == TEST) {
+	  res = f_open(&file, "data.txt", FA_READ);
+	  if (res != FR_OK) {
+		  // Handle file open error
+		  Error_Handler();
+	  }
+	  res = f_open(&file2, "re_iter.txt", FA_CREATE_ALWAYS | FA_WRITE); //file that contains the re-elaborated data
 	  if (res != FR_OK) {
 		  // Handle file open error
 		  Error_Handler();
@@ -333,27 +366,63 @@ int main(void)
 	uint32_t micro_elaps = 0;
 	uint16_t write_faults = 0;
 
+	uint32_t t0 = HAL_GetTick();
+
+	if (umb_input == LAUNCH) { //creates the setup line in the flash
+		//good to go
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET); //output to pad pb12
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET); //output to pad pb13 GOOD TO GO FOR LAUNCH
+		//indicator led
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET); //RED LED ON
+
+		//first page of flash programmed with setup data:
+		uint8_t TxBufTEMP_with_cmd[4+256] = {0x02}; //tx flash buffer: 1*(cmd) + 3*(mem addr) + 256*(data)
+		uint8_t* TxBufTEMP = TxBufTEMP_with_cmd + 4;
+		uint32_t fill_idxTEMP = 0;
+
+		//t0, gyro_offset, acc_offset
+		memcpy(TxBufTEMP + fill_idxTEMP, &t0, sizeof(t0)); //to , from , how many
+		fill_idxTEMP += sizeof(t0);
+
+		memcpy(TxBufTEMP + fill_idxTEMP, gyro_offset, sizeof(gyro_offset));
+		fill_idxTEMP += sizeof(gyro_offset);
+
+		memcpy(TxBufTEMP + fill_idxTEMP, acc_offset, sizeof(acc_offset));
+		fill_idxTEMP += sizeof(acc_offset);
+
+		flash_program(TxBufTEMP_with_cmd, &hspi1);
+	}
+
+	if (umb_input == TEST) { //decodes the setup line from the SD to the corresponding variables
+		uint8_t transfer_buffer[64]; //buffer that stores the read bytes
+		res = f_read(&file, transfer_buffer, 64, &br);
+		uint8_t idx = 0;
+		memcpy(&t0, transfer_buffer, sizeof(t0));//to , from , how many
+		idx += sizeof(t0);
+		memcpy(gyro_offset, transfer_buffer + idx, sizeof(gyro_offset));
+		idx += sizeof(gyro_offset);
+		memcpy(acc_offset, transfer_buffer + idx, sizeof(acc_offset));
+	}
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  if (umb_input == LAUNCH) {
-	  //good to go
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET); //output to pad pb12
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET); //output to pad pb13 GOOD TO GO FOR LAUNCH
-	  //indicator led
-	  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET); //RED LED ON
-  }
 
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	if (counter>=10000) {HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_RESET);} //RED LED OFF
-
 	tic = HAL_GetTick(); //millis
 	tick = my_micros(&htim2); //micros
+
+	if ((tic-t0>1500) && (umb_input == LAUNCH)) {
+		//disable launch command after 1.5 sec, to ensure that ignition doesn't happen after too much time.
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); //output to pad pb12
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET); //output to pad pb13
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_RESET); //RED LED OFF
+	}
 
 	typedef enum {
 	    FILLING_BUF_A,
@@ -362,24 +431,97 @@ int main(void)
 	static BufferState bufferstate = FILLING_BUF_A;
 
 	//READINGS
-	if (is_ADC_done()) {
-		ADC_to_voltages(adc_dma_buf,voltages);
-		HAL_ADC_Start_DMA(&hadc1,adc_dma_buf, 4);
+	if (umb_input == LAUNCH) { //reads only if the command was read as LAUNCH (avoids overwriting of the buffers during reiteration of the data if umb_input==TEST)
+		if (is_ADC_done()) {
+			ADC_to_voltages(adc_dma_buf,voltages);
+			HAL_ADC_Start_DMA(&hadc1,adc_dma_buf, 4);
+		}
+		if (is_SPI3_done()) {
+			read_IMU_Bar(&hspi3, IMU_tag_buff, Bar_pt_buff);
+		}
 	}
 
-	if (is_SPI3_done()) {
-		read_IMU_Bar(&hspi3, IMU_tag_buff, Bar_pt_buff);
+	if ((umb_input == TEST)&&(counter<=19000)) { //copies some of the needed values stored in the file, to their corresponding variable
+
+		//res = f_open(&file, "data.txt", FA_READ);
+
+		static uint32_t offset = 256; //skips the first page since it has only setup data
+
+		res = f_lseek(&file, offset); //positions the read pointer at the offset
+
+		#define RECORD_SIZE 100 //should be the same as the "packet_size" used to record the data in question
+		uint8_t transfer_buffer[RECORD_SIZE]; //buffer that stores the read bytes
+		res = f_read(&file, transfer_buffer, RECORD_SIZE, &br);
+
+		uint32_t copy_idx = 0;
+		//memcpy(&counter, transfer_buffer + copy_idx, sizeof(counter));//to , from , how many
+		copy_idx += sizeof(counter);
+		memcpy(&tic, transfer_buffer + copy_idx, sizeof(tic));
+		copy_idx += sizeof(tic);
+		memcpy(&micro_elaps, transfer_buffer + copy_idx, sizeof(micro_elaps));
+		copy_idx += sizeof(micro_elaps);
+		memcpy(IMU_tag_buff+1, transfer_buffer + copy_idx, sizeof(IMU_tag_buff)-1); //the first byte is empty
+		copy_idx += sizeof(IMU_tag_buff)-1;
+		memcpy(target_gyro, transfer_buffer + copy_idx, sizeof(target_gyro));
+		copy_idx += sizeof(target_gyro);
+		//memcpy(thetas, transfer_buffer + copy_idx, sizeof(thetas));//12
+		copy_idx += sizeof(thetas);
+		//memcpy(gammas, transfer_buffer + copy_idx, sizeof(gammas));//12
+		copy_idx += sizeof(gammas);
+		//memcpy(ReqTorque, transfer_buffer + copy_idx, sizeof(ReqTorque));//12
+		copy_idx += sizeof(ReqTorque);
+		memcpy(voltages, transfer_buffer + copy_idx, sizeof(voltages));//16
+		copy_idx += sizeof(voltages);
+		//memcpy(&press_bar, transfer_buffer + copy_idx, sizeof(press_bar));//4
+		copy_idx += sizeof(press_bar);
+		//memcpy(&filtered_alt, transfer_buffer + copy_idx, sizeof(filtered_alt));//4
+		copy_idx += sizeof(filtered_alt);
+		//memcpy(&write_faults, transfer_buffer + copy_idx, sizeof(write_faults));//2
+		copy_idx += sizeof(write_faults);
+
+		if (counter%2 == 0) {
+			offset += 100;
+		} else {
+			offset += 156;
+		}
+
+		if (counter%100 == 0) {
+
+		}
 	}
 
-	static uint8_t all_engines = 0;
+	//all engine activated at least once:
+	/*static uint8_t all_engines = 0;
 	if (!all_engines) {
 		static uint8_t engine_state[3] = {};
 		for (int i=0;i<3;i++) {
 			if (voltages[i]>=0.4) {engine_state[i] = 1;};
 		}
 		if ((engine_state[0]+engine_state[1]+engine_state[2])==3) {
-			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2, GPIO_PIN_SET); //BLUE LED ON
+			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_SET); //YELLOW LED ON
 			all_engines = 1;
+		}
+	}*/
+
+	//all engines activated LED:
+	uint8_t engine_state[3] = {};
+	for (int i=0;i<3;i++) {
+		if (voltages[i]>=0.4) {
+			engine_state[i] = 1;
+		} else {engine_state[i] = 0;}
+	}
+	if ((engine_state[0] + engine_state[1] + engine_state[2]) == 3) {
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_SET); //YELLOW LED ON
+	} else {
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET); //YELLOW LED OFF
+	}
+
+	//Voltage -> Force
+	for (int i=0;i<3;i++) {
+		if (voltages[i]>=0.4) {
+			Forces[i] = 9;//9 Newtons if D9 engine. 12 Newtons if E12 engine. E12 were used in the static tests
+		} else {
+			Forces[i] = 0;
 		}
 	}
 
@@ -396,7 +538,7 @@ int main(void)
 
 	updateReqTorque(axang, gyro, target_gyro, body_quat, target_quat, ReqTorque, micro_elaps);
 	//get_parabVertex_angles(thetas, gammas, Forces, ReqTorque);
-	get_angles_RMS_and_paraboloid(thetas, gammas, Forces, ReqTorque);
+	get_angles_RMS_and_paraboloid(thetas, gammas, Forces, ReqTorque, &diff);
 	writeServos(thetas, gammas, &htim1, &htim3); //refers just to the 6 thrust vectoring servos, not to the parachute deploying servo
 
 
@@ -412,11 +554,21 @@ int main(void)
 	filtered_alt = filter_altitude(alt, acc_earth[2], micro_elaps);//KALMAN. Accelerometer is used as the control input and for the estimate state. barometer is used as the measurement
 
 
+	if ((umb_input == TEST)&&(counter<=19000)) {
+		f_write(&file2, &diff, sizeof(diff), &bw);
+	}
+	if ((umb_input == TEST)&&(counter>19000)) {
+		HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2, GPIO_PIN_SET); //BLUE LED ON
+		f_sync(&file2);
+	}
 
 
+	//if (counter>10&&counter<20) {loggingstate=LOGGING_SD;}
+	//if (counter>20) {loggingstate=NOT_LOGGING;}
 
-	if (counter>10&&counter<20) {loggingstate=LOGGING_SD;}
-	if (counter>20) {loggingstate=NOT_LOGGING;}
+	if (umb_input == LAUNCH) { //logging logic
+		if (tic-t0>10000) {loggingstate=LOGGING_SD;}
+	}
 
 	if (loggingstate == LOGGING_FLASH) {//logs to flash
 		static unsigned int fill_idx = 0; //to know at what index of the buffer we are at
@@ -522,26 +674,36 @@ int main(void)
 
 		uint32_t last_addr = get_flash_add() + 255;//returns the last flash address at which we wrote a byte.
 		//get_flash_add gives the start of the page. +255 brings to the last byte, since every page_program writes 256 bytes
-		static uint32_t read_addr = 0; //add at which we want to read
+
+		static uint32_t read_addr = 0; //address at which we want to read
 		uint32_t nbytes = 256;//Reading the flash is not limited to reading 256 bytes, so consider increasing this number. You would have to edit the function fast_read, and SDbuf_with_cmd
 		uint8_t SDbuf_with_cmd[256+5] = {};//fast read is +5, read is +4 //REMEMBER TO PLACE nbytes here correctly in the size
 		uint8_t *SDbuf = SDbuf_with_cmd + 5;
 
 		if (read_addr <= last_addr) { //if we haven't read everything that was written yet
 
-			if (is_SPI1_done()) {
+			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2, GPIO_PIN_RESET); //BLUE LED OFF
+
+			if (is_SPI1_done()) { //READ FROM FLASH
 				if (!is_flash_busy(&hspi1)) { //put here for safety, but the RDY bit is not set to 0 when reading
 					fast_read_flash(SDbuf_with_cmd, nbytes, read_addr, &hspi1);
 					read_addr += nbytes;//increments read address by the number of bytes read
 				} else SD_faults+=1;
 			} else SD_faults+=1;
 
-			if (is_SPI1_done()) {
+			if (is_SPI1_done()) { //WRITE TO SD
 				if (!is_flash_busy(&hspi1)) {
 					f_write(&file, SDbuf, nbytes, &bw); //fwrite doesnt set the spi1_done variable to 0, but it should be blocking so there shouldnt be any issue
-					f_sync(&file);
+
+					if (counter%10 == 0) {//syncs every 10 loops
+						f_sync(&file);
+					}
+
 				} else SD_faults+=1;
 			} else SD_faults+=1;
+		} else {
+			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2, GPIO_PIN_SET); //BLUE LED ON
+			f_sync(&file);
 		}
 
 	}
@@ -549,8 +711,8 @@ int main(void)
 	toc = HAL_GetTick();
 	tock = my_micros(&htim2);
 
-	elaps = toc-tic;
-	micro_elaps = tock-tick;
+	elaps = toc-tic; //stops with breakpoints
+	micro_elaps = tock-tick; //doesn't stop with breakpoints, keeps counting
 	counter ++;
 
   }
