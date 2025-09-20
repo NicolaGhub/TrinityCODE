@@ -29,12 +29,12 @@ static const float 	K = 0.05,//angle minimazation coefficient
 					R_gain_x = 1.0f,//gains of req torque vector
 					R_gain_y = 1.0f,
 					R_gain_z = 4.0f,
-					Ix = 0.06959f,//inertia
-					Iy = 0.06709f,//inertia
-					Iz = 0.0007898f,//inertia
+					Ix = 0.06695f,//0.06959f,//inertia
+					Iy = 0.06694f,//0.06709f,//inertia
+					Iz = 0.0008214f,//0.0007898f,//inertia
 					lx = 0.021234f,//components of vector from CM to Motor Force applied by motor number 1. The others will then be calculated by rotating it by 120 & 240deg
 					ly = -0.014f,
-					lz = -0.2475f;
+					lz = -0.2975f;//-0.2475f;
 
 void initIMU(SPI_HandleTypeDef *hspi, uint8_t *tagBuff) { //+-2000 deg/s, +-16g
 	spi3_done = 0;
@@ -656,7 +656,7 @@ float get_bar_alt(float press) {
 
 	static const float T0 = 298; //T0 is the temperature at 0 meters level, in Kelvin
 	static const float RR = 287.05; //Gas constant for dry air [J / (kg * K) ]
-	static const float p0 = 1013; //Today's pressure at 0m level [hPa]
+	static const float p0 = 1023; //Today's pressure at 0m level [hPa]
 	static const float g0 = 9.80665; //No explanation needed, come on
 	//WARNING!!!! :
 	//press to altitude formula. Approximated through a Taylor expansion, but it's fine for my altitude range (up until ~5km)
@@ -1382,6 +1382,63 @@ float filter_altitude(float bar_alt, float az_earth, uint32_t micro_elaps) {
 	p1  = p1_new;
 
 	return x0;
+}
+
+#define window_length 5
+void moving_average_gyro(float *gyro) {
+
+	static float buff0[window_length] = {};
+	static float buff1[window_length] = {};
+	static float buff2[window_length] = {};
+	static uint8_t counter = 0;
+	static float sum[3] = {};
+
+	sum[0] -= buff0[counter];
+	sum[1] -= buff1[counter];
+	sum[2] -= buff2[counter];
+
+	buff0[counter] = gyro[0];
+	buff1[counter] = gyro[1];
+	buff2[counter] = gyro[2];
+
+	sum[0] += buff0[counter];
+	sum[1] += buff1[counter];
+	sum[2] += buff2[counter];
+
+	counter+=1;
+	if (counter >= window_length) counter = 0;
+
+	gyro[0] = sum[0] / window_length;
+	gyro[1] = sum[1] / window_length;
+	gyro[2] = sum[2] / window_length;
+}
+
+void moving_average_acc(float *acc) {
+
+	static float buff0[window_length] = {};
+	static float buff1[window_length] = {};
+	static float buff2[window_length] = {};
+	static uint8_t counter = 0;
+	static float sum[3] = {};
+
+	sum[0] -= buff0[counter];
+	sum[1] -= buff1[counter];
+	sum[2] -= buff2[counter];
+
+	buff0[counter] = acc[0];
+	buff1[counter] = acc[1];
+	buff2[counter] = acc[2];
+
+	sum[0] += buff0[counter];
+	sum[1] += buff1[counter];
+	sum[2] += buff2[counter];
+
+	counter+=1;
+	if (counter >= window_length) counter = 0;
+
+	acc[0] = sum[0] / window_length;
+	acc[1] = sum[1] / window_length;
+	acc[2] = sum[2] / window_length;
 }
 
 #endif

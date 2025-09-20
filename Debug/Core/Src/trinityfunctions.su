@@ -59,3 +59,5 @@
 ../Core/Src/trinityfunctions.c:1268:7:get_accelerometer_variance	120	dynamic
 ../Core/Src/trinityfunctions.c:1303:7:get_barometer_variance	88	dynamic
 ../Core/Src/trinityfunctions.c:1339:7:filter_altitude	88	static
+../Core/Src/trinityfunctions.c:1388:6:moving_average_gyro	16	static
+../Core/Src/trinityfunctions.c:1416:6:moving_average_acc	16	static

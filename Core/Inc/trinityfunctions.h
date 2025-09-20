@@ -134,4 +134,7 @@ float get_accelerometer_variance(SPI_HandleTypeDef *hspi, float *local_acc0, int
 float get_barometer_variance(SPI_HandleTypeDef *hspi, int n_cycles);
 float filter_altitude(float bar_alt, float az_earth, uint32_t micro_elaps);
 
+void moving_average_gyro(float *gyro);
+void moving_average_acc(float *acc);
+
 #endif /* INC_TRINITYFUNCTIONS_H_ */

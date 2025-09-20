@@ -82,6 +82,7 @@ static void MX_TIM2_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#define PI 3.1415926535897932384626433832795
 
 uint8_t IMU_tag_buff[15] = {}; //temp, acc, gyro
 uint8_t Bar_pt_buff[6] = {};
@@ -225,7 +226,7 @@ int main(void)
 */
   //blocking the execution unless the state isn't "NONE" anymore
   UmbilicalState umb_input = NONE;
-  umb_input = TEST; //bypass for debugging
+  //umb_input = LAUNCH; //bypass for debugging
   while (umb_input == NONE) {
 	  UmbilicalState temp_umb_input = read_umbilical();
 	  HAL_Delay(500);
@@ -247,7 +248,7 @@ int main(void)
 	  block_erase(&hspi1, 0);//blocking, erases 64kb of data starting from address 0x00
 	  loggingstate = LOGGING_FLASH;
 	  //takes about 12 secs
-	  for (int nblock = 0; nblock < 50; nblock++) { //flash erase cycles
+	  for (int nblock = 0; nblock < 100; nblock++) { //flash erase cycles
 		  block_erase(&hspi1, nblock*0x10000);//delay incorporated in the function (250ms)
 		  HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2); //BLUE LED TOGGLE
 	  }
@@ -417,7 +418,7 @@ int main(void)
 	tic = HAL_GetTick(); //millis
 	tick = my_micros(&htim2); //micros
 
-	if ((tic-t0>1500) && (umb_input == LAUNCH)) {
+	if ((tic-t0>1500) && (umb_input == LAUNCH) && (tic-t0<2000)) {
 		//disable launch command after 1.5 sec, to ensure that ignition doesn't happen after too much time.
 		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); //output to pad pb12
 		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET); //output to pad pb13
@@ -513,10 +514,11 @@ int main(void)
 	if ((engine_state[0] + engine_state[1] + engine_state[2]) == 3) {
 		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_SET); //YELLOW LED ON
 	} else {
-		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET); //YELLOW LED OFF
+		//HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET); //YELLOW LED OFF
 	}
 
 	//Voltage -> Force
+
 	for (int i=0;i<3;i++) {
 		if (voltages[i]>=0.4) {
 			Forces[i] = 9;//9 Newtons if D9 engine. 12 Newtons if E12 engine. E12 were used in the static tests
@@ -527,6 +529,34 @@ int main(void)
 
 	get_gyro(IMU_tag_buff, gyro_offset, gyro);//processes gyro data by offsetting, and by bringing it to the right reference frame (IMU to rocket frame)
 	get_acc(IMU_tag_buff, acc_offset, acc, acc_raw);
+
+	moving_average_gyro(gyro);
+	moving_average_acc(acc);
+
+	static uint8_t detect_launch = 0;
+	static uint32_t launch_time = 0;
+	if (acc[2] >= 12) { // m/s^2
+		if (detect_launch == 0) {
+			launch_time = HAL_GetTick();
+			//HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_SET);//YELLOW LED ON
+		}
+		detect_launch = 1;
+	}
+
+	/*if ((tic-launch_time) >= 1000) {
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET);//YELLOW LED OFF
+		detect_launch = 0;
+	}*/
+
+	if (detect_launch == 1) {
+		float t = (tic-launch_time)/1000.0;//time in seconds since launch detection
+		float k = 4; //compactness
+		float T = 1; //middle of sigmoid
+		float angle = PI/2; //angle of rotation
+		const float sqrt_pi = 1.77245385091;
+		float induced = k*exp( -pow(k*(t-T),2) )/sqrt_pi*angle; //gaussian distribution function. Its primitive is a sigmoid
+		target_gyro[2] = induced;
+	}
 
 	gyro2quat_integration(gyro, body_quat, micro_elaps); //gets the body quaternion
 	gyro2quat_integration(target_gyro, target_quat, micro_elaps); //gets the target quaternion
@@ -554,8 +584,39 @@ int main(void)
 	filtered_alt = filter_altitude(alt, acc_earth[2], micro_elaps);//KALMAN. Accelerometer is used as the control input and for the estimate state. barometer is used as the measurement
 
 
+	if ((umb_input == LAUNCH)&&(tic-t0 >= 2000)) {//Chute deployment check
+		static uint8_t check_alt = 1;
+		static uint32_t check_time = 0;
+
+		if ((tic - check_time) >= 500) {
+			check_alt = 1;
+		}
+
+		if (check_alt == 1) {
+			check_time = tic;
+			check_alt = 0;
+			static uint8_t consecutive = 0;
+			static float prev_alt = -100000;
+
+			float curr_alt = pos_earth[2];
+			if ((curr_alt - prev_alt) <= -0.5) {
+				consecutive += 1 ;
+			} else {consecutive = 0;}
+
+			prev_alt = curr_alt;
+
+			if (consecutive == 2) {
+				//OPEN CHUTE COMMAND
+				//REMEMBER TO PUT THE CHUTE OPEN COMMAND!!!!!!
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET); //RED LED ON
+				__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 900);//open chute
+			}
+		}
+
+	}
+
 	if ((umb_input == TEST)&&(counter<=19000)) {
-		f_write(&file2, &diff, sizeof(diff), &bw);
+		f_write(&file2, pos_earth + 2, sizeof(diff), &bw);
 	}
 	if ((umb_input == TEST)&&(counter>19000)) {
 		HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2, GPIO_PIN_SET); //BLUE LED ON
@@ -567,7 +628,7 @@ int main(void)
 	//if (counter>20) {loggingstate=NOT_LOGGING;}
 
 	if (umb_input == LAUNCH) { //logging logic
-		if (tic-t0>10000) {loggingstate=LOGGING_SD;}
+		if (tic-t0>20000) {loggingstate=LOGGING_SD;} //logs to flash for 20 sec
 	}
 
 	if (loggingstate == LOGGING_FLASH) {//logs to flash
